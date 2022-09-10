@@ -164,7 +164,7 @@ static void display_loop(void *arg)
 		if (prev_hz != freq_hz) {
 			prev_hz = freq_hz;
 
-			lcd_draw_fill_rect(tft, 0, 0, HEIGHT - PLOT, WIDTH, DARK);
+			lcd_draw_fill_rect(tft, 0, 0, HEIGHT - PLOT - 1, WIDTH, DARK);
 
 			char sps[16];
 			sprintf(sps, "%ik", freq_hz / 1000);
