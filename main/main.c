@@ -170,8 +170,6 @@ static void display_loop(void *arg)
 			sprintf(sps, "%ik", freq_hz / 1000);
 			lcd_draw_string(tft, font, 2, WIDTH / 2 - 20, sps, RED);
 		}
-
-		ESP_LOGI(tag, "freq: %-7u  avg: %-4u", freq_hz, average);
 	}
 }
 
@@ -249,14 +247,12 @@ static void input_loop(void *arg)
 
 		while (r_direction > 0) {
 			r_direction--;
-			ESP_LOGI(tag, "->");
 			if (freq_hz + 10000 <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
 				freq_hz += 10000;
 		}
 
 		while (r_direction < 0) {
 			r_direction++;
-			ESP_LOGI(tag, "<-");
 			if (freq_hz - 10000 >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
 				freq_hz -= 10000;
 		}
