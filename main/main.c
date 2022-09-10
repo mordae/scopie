@@ -184,12 +184,11 @@ enum {
 
 enum {
 	R_START = 0,
-	R_CW_FINAL,
-	R_CW_BEGIN,
-	R_CW_NEXT,
 	R_CCW_BEGIN,
-	R_CCW_FINAL,
-	R_CCW_NEXT,
+	R_CW_BEGIN,
+	R_START_M,
+	R_CW_BEGIN_M,
+	R_CCW_BEGIN_M,
 };
 
 
@@ -200,14 +199,13 @@ static volatile IRAM_ATTR int r_pressed = 0;
 
 static void rotary_change(void *arg)
 {
-	const uint8_t r_table[7][4] = {
-		{R_START,    R_CW_BEGIN,  R_CCW_BEGIN, R_START},
-		{R_CW_NEXT,  R_START,     R_CW_FINAL,  R_START | DIR_CW},
-		{R_CW_NEXT,  R_CW_BEGIN,  R_START,     R_START},
-		{R_CW_NEXT,  R_CW_BEGIN,  R_CW_FINAL,  R_START},
-		{R_CCW_NEXT, R_START,     R_CCW_BEGIN, R_START},
-		{R_CCW_NEXT, R_CCW_FINAL, R_START,     R_START | DIR_CCW},
-		{R_CCW_NEXT, R_CCW_FINAL, R_CCW_BEGIN, R_START},
+	const uint8_t r_table[6][4] = {
+		{R_START_M,           R_CW_BEGIN,     R_CCW_BEGIN,  R_START},
+		{R_START_M | DIR_CCW, R_START,        R_CCW_BEGIN,  R_START},
+		{R_START_M | DIR_CW,  R_CW_BEGIN,     R_START,      R_START},
+		{R_START_M,           R_CCW_BEGIN_M,  R_CW_BEGIN_M, R_START},
+		{R_START_M,           R_START_M,      R_CW_BEGIN_M, R_START},
+		{R_START_M,           R_CCW_BEGIN_M,  R_START_M,    R_START},
 	};
 
 	uint8_t pinstate = (!gpio_get_level(4) << 1) | (!gpio_get_level(2));
@@ -261,6 +259,11 @@ static void input_loop(void *arg)
 			ESP_LOGI(tag, "<-");
 			if (freq_hz - 10000 >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
 				freq_hz -= 10000;
+		}
+
+		while (r_pressed > 0) {
+			r_pressed--;
+			freq_hz = 100000;
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
