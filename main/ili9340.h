@@ -124,7 +124,7 @@ void lcd_draw_line(tft_t *dev, uint16_t x1, uint16_t y1, uint16_t x2,
 void lcd_draw_rect(tft_t *dev, uint16_t x1, uint16_t y1, uint16_t x2,
 		 uint16_t y2, uint16_t color);
 
-void lcd_draw_rectAngle(tft_t *dev, uint16_t xc, uint16_t yc, uint16_t w,
+void lcd_draw_rect_angle(tft_t *dev, uint16_t xc, uint16_t yc, uint16_t w,
 		      uint16_t h, uint16_t angle, uint16_t color);
 
 void lcd_draw_triangle(tft_t *dev, uint16_t xc, uint16_t yc, uint16_t w,

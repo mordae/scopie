@@ -786,7 +786,7 @@ void lcd_draw_rect(tft_t *dev, uint16_t x1, uint16_t y1, uint16_t x2,
  * x1 = x * cos(angle) - y * sin(angle)
  * y1 = x * sin(angle) + y * cos(angle)
  */
-void lcd_draw_rectAngle(tft_t *dev, uint16_t xc, uint16_t yc, uint16_t w,
+void lcd_draw_rect_angle(tft_t *dev, uint16_t xc, uint16_t yc, uint16_t w,
 			uint16_t h, uint16_t angle, uint16_t color)
 {
 	double xd, yd, rd;
