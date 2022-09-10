@@ -557,25 +557,21 @@ void lcd_draw_multi_pixels(tft_t *dev, uint16_t x, uint16_t y, uint16_t size,
 	}			// 0x7735
 
 	if (dev->_model == 0x9225) {
-		for (int j = _y1; j <= _y2; j++) {
-			lcd_write_register_byte(dev, 0x20, _x1);
-			lcd_write_register_byte(dev, 0x21, j);
-			spi_master_write_comm_byte(dev, 0x22);	// Memory Write
-			spi_master_write_colors(dev, colors, size);
-		}
+		lcd_write_register_byte(dev, 0x20, _x1);
+		lcd_write_register_byte(dev, 0x21, _y1);
+		spi_master_write_comm_byte(dev, 0x22);	// Memory Write
+		spi_master_write_colors(dev, colors, size);
 	}			// endif 0x9225
 
 	if (dev->_model == 0x9226) {
-		for (int j = _x1; j <= _x2; j++) {
-			lcd_write_register_byte(dev, 0x36, j);
-			lcd_write_register_byte(dev, 0x37, j);
-			lcd_write_register_byte(dev, 0x38, _y2);
-			lcd_write_register_byte(dev, 0x39, _y1);
-			lcd_write_register_byte(dev, 0x20, j);
-			lcd_write_register_byte(dev, 0x21, _y1);
-			spi_master_write_comm_byte(dev, 0x22);
-			spi_master_write_colors(dev, colors, size);
-		}
+		lcd_write_register_byte(dev, 0x36, _x2);
+		lcd_write_register_byte(dev, 0x37, _x1);
+		lcd_write_register_byte(dev, 0x38, _y2);
+		lcd_write_register_byte(dev, 0x39, _y1);
+		lcd_write_register_byte(dev, 0x20, _y2);
+		lcd_write_register_byte(dev, 0x21, _y1);
+		spi_master_write_comm_byte(dev, 0x22);
+		spi_master_write_colors(dev, colors, size);
 	}			// endif 0x9226
 
 }
