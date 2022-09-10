@@ -26,15 +26,16 @@
 #include "driver/spi_master.h"
 #include "fontx.h"
 
-#define RED			0xf800
-#define GREEN			0x07e0
-#define BLUE			0x001f
-#define BLACK			0x0000
-#define WHITE			0xffff
-#define GRAY			0x8c51
-#define YELLOW			0xFFE0
-#define CYAN			0x07FF
-#define PURPLE			0xF81F
+#define RED			0b1111100000000000
+#define GREEN			0b0000011111100000
+#define BLUE			0b0000000000011111
+#define BLACK			0x0000000000000000
+#define DARK			0b0001100001100011
+#define WHITE			0b1111111111111111
+#define GRAY			0b1000110001010001
+#define YELLOW			(RED | GREEN)
+#define CYAN			(GREEN | BLUE)
+#define PURPLE			(RED | BLUE)
 
 #define DIRECTION0		0
 #define DIRECTION90		1
