@@ -129,7 +129,7 @@ static void display_loop(void *arg)
 {
 	int bufno = 0;
 	int prev_hz = 0;
-	int average = 0;
+	int average = 3300 / 2;
 
 	while (1) {
 		volts = volts_array[bufno];
@@ -157,7 +157,7 @@ static void display_loop(void *arg)
 		for (int i = start; i < start + WIDTH; i++) {
 			uint16_t colors[PLOT] = {BLACK};
 			colors[PLOT * vs[i] / 3300] = WHITE;
-			colors[PLOT * average / 3300] = GREEN;
+			colors[PLOT * average / 3300] = i - start < 100 ? BLUE : GREEN;
 			lcd_draw_multi_pixels(tft, HEIGHT - PLOT, i - start, PLOT, colors);
 		}
 
@@ -166,9 +166,10 @@ static void display_loop(void *arg)
 
 			lcd_draw_fill_rect(tft, 0, 0, HEIGHT - PLOT - 1, WIDTH, DARK);
 
-			char sps[16];
-			sprintf(sps, "%ik", freq_hz / 1000);
-			lcd_draw_string(tft, font, 2, WIDTH / 2 - 20, sps, RED);
+			char buf[16];
+
+			sprintf(buf, "%i Hz", freq_hz / 100);
+			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
 		}
 	}
 }
@@ -190,9 +191,18 @@ enum {
 };
 
 
+enum {
+	M_FREQ_10000 = 0,
+	M_FREQ_1000,
+	M_FREQ_100,
+	M_MAX,
+};
+
+
 static volatile IRAM_ATTR int r_state = R_START;
 static volatile IRAM_ATTR int r_direction = 0;
 static volatile IRAM_ATTR int r_pressed = 0;
+static volatile IRAM_ATTR int r_mode = 0;
 
 
 static void rotary_change(void *arg)
@@ -216,12 +226,19 @@ static void rotary_change(void *arg)
 		r_state &= 0xf;
 		r_direction--;
 	}
-}
 
+	if (r_pressed) {
+		r_pressed = !gpio_get_level(13);
+	} else {
+		r_pressed = !gpio_get_level(13);
 
-static void rotary_press(void *arg)
-{
-	r_pressed += 1;
+		if (r_pressed) {
+			if (M_MAX <= r_mode + 1)
+				r_mode = 0;
+			else
+				r_mode++;
+		}
+	}
 }
 
 
@@ -232,7 +249,7 @@ static void input_loop(void *arg)
 
 	ESP_ERROR_CHECK(gpio_isr_handler_add(2, rotary_change, NULL));
 	ESP_ERROR_CHECK(gpio_isr_handler_add(4, rotary_change, NULL));
-	ESP_ERROR_CHECK(gpio_isr_handler_add(13, rotary_press, NULL));
+	ESP_ERROR_CHECK(gpio_isr_handler_add(13, rotary_change, NULL));
 
 	gpio_config_t config = {
 		.pin_bit_mask = BIT64(4) | BIT64(2) | BIT64(13),
@@ -245,21 +262,25 @@ static void input_loop(void *arg)
 	while (1) {
 		rotary_change(NULL);
 
+		int step = 0;
+
+		if (r_mode == M_FREQ_10000)
+			step = 10000;
+		else if (r_mode == M_FREQ_1000)
+			step = 1000;
+		else if (r_mode == M_FREQ_100)
+			step = 100;
+
 		while (r_direction > 0) {
 			r_direction--;
-			if (freq_hz + 10000 <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
-				freq_hz += 10000;
+			if (freq_hz + step <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
+				freq_hz += step;
 		}
 
 		while (r_direction < 0) {
 			r_direction++;
-			if (freq_hz - 10000 >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
-				freq_hz -= 10000;
-		}
-
-		while (r_pressed > 0) {
-			r_pressed--;
-			freq_hz = 100000;
+			if (freq_hz - step >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
+				freq_hz -= step;
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
@@ -301,7 +322,7 @@ void app_main(void)
 		.en_ch = DAC_GPIO26_CHANNEL,
 		.scale = DAC_CW_SCALE_1,
 		.phase = DAC_CW_PHASE_0,
-		.freq = 10 * 1000,
+		.freq = 50250, /* ~1kHz */
 		.offset = 0,
 	};
 
