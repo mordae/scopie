@@ -62,6 +62,9 @@ static uint8_t frame[ADC_BUFFER];
 static uint16_t volts_array[3][ADC_FRAME];
 static uint16_t *volts;
 
+static int zoom = 3300;
+static int offset = 0;
+
 float average = 3300 / 2;
 int averages[WIDTH] = {0};
 
@@ -73,6 +76,8 @@ enum {
 	M_FREQ_10000 = 0,
 	M_FREQ_1000,
 	M_FREQ_100,
+	M_ZOOM,
+	M_OFFSET,
 	M_MAX,
 };
 
@@ -202,12 +207,23 @@ static void display_loop(void *arg)
 		}
 
 		for (int i = 0; i < WIDTH; i++)
-			averages[i] = ((averages[i] << 5) - averages[i] + (vs[start + i] << 8)) >> 5;
+			averages[i] = ((averages[i] << 3) - averages[i] + (vs[start + i] << 8)) >> 3;
 
 		for (int i = start; i < start + WIDTH; i++) {
 			uint16_t colors[PLOT] = {BLACK};
-			colors[PLOT * vs[i] / 3300] = WHITE;
-			colors[(int)(PLOT * average / 3300)] = i - start < 100 ? BLUE : GREEN;
+
+			int avp = PLOT * ((averages[i - start] >> 8) + offset) / zoom;
+			if (avp >= 0 && avp < PLOT)
+				colors[avp] = PURPLE & GRAY;
+
+			int vp = PLOT * (vs[i] + offset) / zoom;
+			if (vp >= 0 && vp < PLOT)
+				colors[vp] = WHITE;
+
+			int ap = PLOT * (average + offset) / zoom;
+			if (ap >= 0 && ap < PLOT)
+				colors[ap] = i - start < 100 ? BLUE : GREEN;
+
 			lcd_draw_multi_pixels(tft, HEIGHT - PLOT, i - start, PLOT, colors);
 		}
 
@@ -228,6 +244,10 @@ static void display_loop(void *arg)
 				strcpy(buf, "step 10 Hz");
 			else if (r_mode == M_FREQ_100)
 				strcpy(buf, "step 1 Hz");
+			else if (r_mode == M_ZOOM)
+				strcpy(buf, "zoom");
+			else if (r_mode == M_OFFSET)
+				strcpy(buf, "offset");
 
 			lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
 		}
@@ -309,16 +329,40 @@ static void input_loop(void *arg)
 			else if (r_mode == M_FREQ_100)
 				step = 100;
 
-			while (r_direction > 0) {
+			while (step && r_direction > 0) {
 				r_direction--;
 				if (freq_hz + step <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
 					freq_hz += step;
 			}
 
-			while (r_direction < 0) {
+			while (step && r_direction < 0) {
 				r_direction++;
 				if (freq_hz - step >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
 					freq_hz -= step;
+			}
+
+			while (r_mode == M_ZOOM && r_direction > 0) {
+				r_direction--;
+				if (zoom > 500)
+					zoom -= 100;
+			}
+
+			while (r_mode == M_ZOOM && r_direction < 0) {
+				r_direction++;
+				if (zoom < 3300)
+					zoom += 100;
+			}
+
+			while (r_mode == M_OFFSET && r_direction > 0) {
+				r_direction--;
+				if (offset > -3300)
+					offset -= 33;
+			}
+
+			while (r_mode == M_OFFSET && r_direction < 0) {
+				r_direction++;
+				if (offset < 0)
+					offset += 33;
 			}
 		}
 
