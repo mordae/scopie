@@ -31,6 +31,7 @@
 #include "esp_vfs.h"
 
 #include <string.h>
+#include <math.h>
 
 
 static const char *tag = "main";
@@ -60,6 +61,36 @@ static uint8_t frame[ADC_BUFFER];
 
 static int volts_array[2][ADC_FRAME];
 static int *volts;
+
+
+/*
+ * Rotary encoder.
+ */
+enum {
+	M_FREQ_10000 = 0,
+	M_FREQ_1000,
+	M_FREQ_100,
+	M_MAX,
+};
+
+enum {
+	DIR_CW	= 0x10,
+	DIR_CCW	= 0x20,
+};
+
+enum {
+	R_START = 0,
+	R_CCW_BEGIN,
+	R_CW_BEGIN,
+	R_START_M,
+	R_CW_BEGIN_M,
+	R_CCW_BEGIN_M,
+};
+
+static volatile IRAM_ATTR int r_state = R_START;
+static volatile IRAM_ATTR int r_direction = 0;
+static volatile IRAM_ATTR int r_pressed = 0;
+static volatile IRAM_ATTR int r_mode = 0;
 
 
 static void cadc_before_read(void)
@@ -129,25 +160,26 @@ static void display_loop(void *arg)
 {
 	int bufno = 0;
 	int prev_hz = 0;
-	int average = 3300 / 2;
+	int prev_mode = -1;
+	float average = 3300 / 2;
 
 	while (1) {
 		volts = volts_array[bufno];
 		bufno = !bufno;
 
 		int *vs = volts_array[bufno];
-		uint32_t total = 0;
+		int total = 0;
 
 		for (int i = 0; i < ADC_FRAME; i++)
 			total += vs[i];
 
-		average = ((average * 15) + (total / ADC_FRAME)) / 16;
+		average = ((average * 15) + ((float)total / ADC_FRAME)) / 16;
 
-		int deviation = INT_MAX;
 		int start = 0;
+		int deviation = INT_MAX;
 
 		for (int i = 1; i < WIDTH; i++) {
-			int dev = abs(vs[i] - average);
+			float dev = fabsf(vs[i] - average);
 			if (dev < deviation && vs[i + 1] >= vs[i] && vs[i - 1] <= vs[i]) {
 				deviation = dev;
 				start = i;
@@ -157,52 +189,32 @@ static void display_loop(void *arg)
 		for (int i = start; i < start + WIDTH; i++) {
 			uint16_t colors[PLOT] = {BLACK};
 			colors[PLOT * vs[i] / 3300] = WHITE;
-			colors[PLOT * average / 3300] = i - start < 100 ? BLUE : GREEN;
+			colors[(int)(PLOT * average / 3300)] = i - start < 100 ? BLUE : GREEN;
 			lcd_draw_multi_pixels(tft, HEIGHT - PLOT, i - start, PLOT, colors);
 		}
 
-		if (prev_hz != freq_hz) {
+		if ((prev_hz != freq_hz) || (prev_mode != r_mode)) {
 			prev_hz = freq_hz;
+			prev_mode = r_mode;
 
 			lcd_draw_fill_rect(tft, 0, 0, HEIGHT - PLOT - 1, WIDTH, DARK);
 
-			char buf[16];
+			char buf[32];
 
 			sprintf(buf, "%i Hz", freq_hz / 100);
 			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
+
+			if (r_mode == M_FREQ_10000)
+				strcpy(buf, "step 100Hz");
+			else if (r_mode == M_FREQ_1000)
+				strcpy(buf, "step 10Hz");
+			else if (r_mode == M_FREQ_100)
+				strcpy(buf, "step 1Hz");
+
+			lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
 		}
 	}
 }
-
-
-enum {
-	DIR_CW	= 0x10,
-	DIR_CCW	= 0x20,
-};
-
-
-enum {
-	R_START = 0,
-	R_CCW_BEGIN,
-	R_CW_BEGIN,
-	R_START_M,
-	R_CW_BEGIN_M,
-	R_CCW_BEGIN_M,
-};
-
-
-enum {
-	M_FREQ_10000 = 0,
-	M_FREQ_1000,
-	M_FREQ_100,
-	M_MAX,
-};
-
-
-static volatile IRAM_ATTR int r_state = R_START;
-static volatile IRAM_ATTR int r_direction = 0;
-static volatile IRAM_ATTR int r_pressed = 0;
-static volatile IRAM_ATTR int r_mode = 0;
 
 
 static void rotary_change(void *arg)
@@ -227,18 +239,7 @@ static void rotary_change(void *arg)
 		r_direction--;
 	}
 
-	if (r_pressed) {
-		r_pressed = !gpio_get_level(13);
-	} else {
-		r_pressed = !gpio_get_level(13);
-
-		if (r_pressed) {
-			if (M_MAX <= r_mode + 1)
-				r_mode = 0;
-			else
-				r_mode++;
-		}
-	}
+	r_pressed = !gpio_get_level(13);
 }
 
 
@@ -262,25 +263,45 @@ static void input_loop(void *arg)
 	while (1) {
 		rotary_change(NULL);
 
-		int step = 0;
+		if (r_pressed) {
+			while (r_direction > 0) {
+				if (r_mode + 1 >= M_MAX)
+					r_mode = 0;
+				else
+					r_mode++;
 
-		if (r_mode == M_FREQ_10000)
-			step = 10000;
-		else if (r_mode == M_FREQ_1000)
-			step = 1000;
-		else if (r_mode == M_FREQ_100)
-			step = 100;
+				r_direction--;
+			}
 
-		while (r_direction > 0) {
-			r_direction--;
-			if (freq_hz + step <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
-				freq_hz += step;
-		}
+			while (r_direction < 0) {
+				if (r_mode - 1 < 0)
+					r_mode = M_MAX - 1;
+				else
+					r_mode--;
 
-		while (r_direction < 0) {
-			r_direction++;
-			if (freq_hz - step >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
-				freq_hz -= step;
+				r_direction++;
+			}
+		} else {
+			int step = 0;
+
+			if (r_mode == M_FREQ_10000)
+				step = 10000;
+			else if (r_mode == M_FREQ_1000)
+				step = 1000;
+			else if (r_mode == M_FREQ_100)
+				step = 100;
+
+			while (r_direction > 0) {
+				r_direction--;
+				if (freq_hz + step <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
+					freq_hz += step;
+			}
+
+			while (r_direction < 0) {
+				r_direction++;
+				if (freq_hz - step >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
+					freq_hz -= step;
+			}
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
