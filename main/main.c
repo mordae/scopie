@@ -49,7 +49,7 @@ static tft_t tft[1];
 /*
  * ADC
  */
-#define ADC_FRAME (WIDTH * 2)
+#define ADC_FRAME (WIDTH * 4)
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
 
 static int freq_hz = 100000;
@@ -61,6 +61,8 @@ static uint8_t frame[ADC_BUFFER];
 
 static int volts_array[2][ADC_FRAME];
 static int *volts;
+
+float average = 3300 / 2;
 
 
 /*
@@ -139,7 +141,7 @@ static void oscilloscope_loop(void *arg)
 		cadc_before_read();
 
 		uint32_t size = 0;
-		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame, ADC_BUFFER, &size, 100));
+		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame, ADC_BUFFER, &size, 1000));
 
 		if (size < ADC_BUFFER) {
 			ESP_LOGE(tag, "ADC did not return a full frame, just %lu bytes.", size);
@@ -147,12 +149,27 @@ static void oscilloscope_loop(void *arg)
 		}
 
 		int *voltsptr = volts;
+		int total = 0;
 
 		for (int i = 0; i < ADC_BUFFER; i += SOC_ADC_DIGI_DATA_BYTES_PER_CONV) {
 			adc_digi_output_data_t *p = (void *)(frame + i);
 			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, voltsptr++));
+			total += voltsptr[-1];
 		}
+
+		average = ((average * 31) + ((float)total / ADC_FRAME)) / 32;
 	}
+}
+
+
+static float slurp(int *vs, int start, int len)
+{
+	float total = 0;
+
+	for (int i = start; i < start + len; i++)
+		total += vs[i];
+
+	return total / len;
 }
 
 
@@ -161,7 +178,6 @@ static void display_loop(void *arg)
 	int bufno = 0;
 	int prev_hz = 0;
 	int prev_mode = -1;
-	float average = 3300 / 2;
 
 	while (1) {
 		volts = volts_array[bufno];
@@ -173,14 +189,17 @@ static void display_loop(void *arg)
 		for (int i = 0; i < ADC_FRAME; i++)
 			total += vs[i];
 
-		average = ((average * 15) + ((float)total / ADC_FRAME)) / 16;
-
 		int start = 0;
 		int deviation = INT_MAX;
 
-		for (int i = 1; i < WIDTH; i++) {
-			float dev = fabsf(vs[i] - average);
-			if (dev < deviation && vs[i + 1] >= vs[i] && vs[i - 1] <= vs[i]) {
+		for (int i = 10; i < ADC_FRAME - WIDTH; i++) {
+			float l = slurp(vs, i - 10, 10);
+			float r = slurp(vs, i + 1, 10);
+
+			float dev = fabsf((l + vs[i] + r) / 3 - average);
+			float angle = r - l;
+
+			if (dev < deviation && angle > 0.0) {
 				deviation = dev;
 				start = i;
 			}
@@ -205,11 +224,11 @@ static void display_loop(void *arg)
 			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
 
 			if (r_mode == M_FREQ_10000)
-				strcpy(buf, "step 100Hz");
+				strcpy(buf, "step 100 Hz");
 			else if (r_mode == M_FREQ_1000)
-				strcpy(buf, "step 10Hz");
+				strcpy(buf, "step 10 Hz");
 			else if (r_mode == M_FREQ_100)
-				strcpy(buf, "step 1Hz");
+				strcpy(buf, "step 1 Hz");
 
 			lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
 		}
