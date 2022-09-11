@@ -59,10 +59,11 @@ static adc_cali_handle_t cali;
 
 static uint8_t frame[ADC_BUFFER];
 
-static int volts_array[2][ADC_FRAME];
-static int *volts;
+static uint16_t volts_array[3][ADC_FRAME];
+static uint16_t *volts;
 
 float average = 3300 / 2;
+int averages[WIDTH] = {0};
 
 
 /*
@@ -148,13 +149,15 @@ static void oscilloscope_loop(void *arg)
 			continue;
 		}
 
-		int *voltsptr = volts;
+		uint16_t *voltsptr = volts;
 		int total = 0;
 
 		for (int i = 0; i < ADC_BUFFER; i += SOC_ADC_DIGI_DATA_BYTES_PER_CONV) {
 			adc_digi_output_data_t *p = (void *)(frame + i);
-			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, voltsptr++));
-			total += voltsptr[-1];
+			int vs = 0;
+			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &vs));
+			*voltsptr++ = vs;
+			total += vs;
 		}
 
 		average = ((average * 31) + ((float)total / ADC_FRAME)) / 32;
@@ -162,48 +165,44 @@ static void oscilloscope_loop(void *arg)
 }
 
 
-static float slurp(int *vs, int start, int len)
-{
-	float total = 0;
-
-	for (int i = start; i < start + len; i++)
-		total += vs[i];
-
-	return total / len;
-}
-
-
 static void display_loop(void *arg)
 {
-	int bufno = 0;
+	unsigned bufno = 0;
 	int prev_hz = 0;
 	int prev_mode = -1;
 
 	while (1) {
+		/* Use the next buffer, please. */
+		bufno = (bufno + 1) % 3;
 		volts = volts_array[bufno];
-		bufno = !bufno;
 
-		int *vs = volts_array[bufno];
-		int total = 0;
+		/* -2th is the current one. */
+		uint16_t *vs = volts_array[(bufno - 2) % 3];
 
-		for (int i = 0; i < ADC_FRAME; i++)
+		uint32_t total = 0;
+
+		for (uint32_t i = 0; i < ADC_FRAME; i++)
 			total += vs[i];
 
 		int start = 0;
 		int deviation = INT_MAX;
 
-		for (int i = 10; i < ADC_FRAME - WIDTH; i++) {
-			float l = slurp(vs, i - 10, 10);
-			float r = slurp(vs, i + 1, 10);
+		for (int i = 0; i < ADC_FRAME - WIDTH; i++) {
+			float dev = 0;
 
-			float dev = fabsf((l + vs[i] + r) / 3 - average);
-			float angle = r - l;
+			for (int j = 0; j < WIDTH; j++) {
+				int d = abs((averages[j] >> 8) - vs[i + j]);
+				dev += d * d;
+			}
 
-			if (dev < deviation && angle > 0.0) {
+			if (dev < deviation) {
 				deviation = dev;
 				start = i;
 			}
 		}
+
+		for (int i = 0; i < WIDTH; i++)
+			averages[i] = ((averages[i] << 5) - averages[i] + (vs[start + i] << 8)) >> 5;
 
 		for (int i = start; i < start + WIDTH; i++) {
 			uint16_t colors[PLOT] = {BLACK};
