@@ -49,7 +49,7 @@ static tft_t tft[1];
 /*
  * ADC
  */
-#define ADC_FRAME (WIDTH * 4)
+#define ADC_FRAME 1000
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
 
 static int freq_hz = 100000;
