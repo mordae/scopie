@@ -233,7 +233,7 @@ static void display_loop(void *arg)
 
 			char buf[32];
 
-			sprintf(buf, "%i Hz", freq_hz / 100);
+			sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
 			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
 
 			if (r_mode == M_FREQ)
@@ -284,11 +284,11 @@ static void rotary_change(void *arg)
 		if (now <= prev) {
 			prev = now - 1;
 		}
-		else if (now - prev > 100) {
-			prev = now - 100;
+		else if (now - prev > 200) {
+			prev = now - 200;
 		}
 
-		int speed = 100 / (now - prev);
+		int speed = 200 / (now - prev);
 		speed = speed * speed;
 		prev = now;
 
@@ -343,7 +343,7 @@ static void input_loop(void *arg)
 		}
 		else if (r_direction) {
 			if (M_FREQ == r_mode) {
-				freq_hz = clamp(freq_hz + r_direction * 100,
+				freq_hz = clamp(freq_hz + r_direction * 10,
 				                SOC_ADC_SAMPLE_FREQ_THRES_LOW,
 				                SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
 			}
