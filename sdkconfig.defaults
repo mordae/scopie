@@ -1,6 +1,7 @@
-#
-# Partition Table
-#
+# Custom partition for spiffs data
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Increase the FreeRTOS tick rate to 1 tick per ms
+CONFIG_FREERTOS_HZ=1000

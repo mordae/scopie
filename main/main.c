@@ -73,9 +73,7 @@ int averages[WIDTH] = {0};
  * Rotary encoder.
  */
 enum {
-	M_FREQ_10000 = 0,
-	M_FREQ_1000,
-	M_FREQ_100,
+	M_FREQ = 0,
 	M_ZOOM,
 	M_OFFSET,
 	M_MAX,
@@ -238,12 +236,8 @@ static void display_loop(void *arg)
 			sprintf(buf, "%i Hz", freq_hz / 100);
 			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
 
-			if (r_mode == M_FREQ_10000)
-				strcpy(buf, "step 100 Hz");
-			else if (r_mode == M_FREQ_1000)
-				strcpy(buf, "step 10 Hz");
-			else if (r_mode == M_FREQ_100)
-				strcpy(buf, "step 1 Hz");
+			if (r_mode == M_FREQ)
+				strcpy(buf, "freq.");
 			else if (r_mode == M_ZOOM)
 				strcpy(buf, "zoom");
 			else if (r_mode == M_OFFSET)
@@ -255,8 +249,22 @@ static void display_loop(void *arg)
 }
 
 
+static int clamp(int x, int min, int max)
+{
+	if (x < min)
+		return min;
+
+	if (x > max)
+		return max;
+
+	return x;
+}
+
+
 static void rotary_change(void *arg)
 {
+	r_pressed = !gpio_get_level(13);
+
 	const uint8_t r_table[6][4] = {
 		{R_START_M,           R_CW_BEGIN,     R_CCW_BEGIN,  R_START},
 		{R_START_M | DIR_CCW, R_START,        R_CCW_BEGIN,  R_START},
@@ -269,15 +277,30 @@ static void rotary_change(void *arg)
 	uint8_t pinstate = (!gpio_get_level(4) << 1) | (!gpio_get_level(2));
 	r_state = r_table[r_state & 0xf][pinstate];
 
-	if (r_state & DIR_CW) {
-		r_state &= 0xf;
-		r_direction++;
-	} else if (r_state & DIR_CCW) {
-		r_state &= 0xf;
-		r_direction--;
-	}
+	if (r_state & (DIR_CW | DIR_CCW)) {
+		static TickType_t prev = 0;
+		TickType_t now = xTaskGetTickCountFromISR() / portTICK_PERIOD_MS;
 
-	r_pressed = !gpio_get_level(13);
+		if (now <= prev) {
+			prev = now - 1;
+		}
+		else if (now - prev > 100) {
+			prev = now - 100;
+		}
+
+		int speed = 100 / (now - prev);
+		speed = speed * speed;
+		prev = now;
+
+		if (r_state & DIR_CW) {
+			r_state &= 0xf;
+			r_direction += speed;
+		}
+		else if (r_state & DIR_CCW) {
+			r_state &= 0xf;
+			r_direction -= speed;
+		}
+	}
 }
 
 
@@ -302,68 +325,36 @@ static void input_loop(void *arg)
 		rotary_change(NULL);
 
 		if (r_pressed) {
-			while (r_direction > 0) {
+			if (r_direction > 0) {
 				if (r_mode + 1 >= M_MAX)
 					r_mode = 0;
 				else
 					r_mode++;
-
-				r_direction--;
 			}
 
-			while (r_direction < 0) {
+			if (r_direction < 0) {
 				if (r_mode - 1 < 0)
 					r_mode = M_MAX - 1;
 				else
 					r_mode--;
-
-				r_direction++;
-			}
-		} else {
-			int step = 0;
-
-			if (r_mode == M_FREQ_10000)
-				step = 10000;
-			else if (r_mode == M_FREQ_1000)
-				step = 1000;
-			else if (r_mode == M_FREQ_100)
-				step = 100;
-
-			while (step && r_direction > 0) {
-				r_direction--;
-				if (freq_hz + step <= SOC_ADC_SAMPLE_FREQ_THRES_HIGH)
-					freq_hz += step;
 			}
 
-			while (step && r_direction < 0) {
-				r_direction++;
-				if (freq_hz - step >= SOC_ADC_SAMPLE_FREQ_THRES_LOW)
-					freq_hz -= step;
+			r_direction = 0;
+		}
+		else if (r_direction) {
+			if (M_FREQ == r_mode) {
+				freq_hz = clamp(freq_hz + r_direction * 100,
+				                SOC_ADC_SAMPLE_FREQ_THRES_LOW,
+				                SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
+			}
+			else if (M_ZOOM == r_mode) {
+				zoom = clamp(zoom - r_direction * 3, 500, 3300);
+			}
+			else if (M_OFFSET == r_mode) {
+				offset = clamp(offset - r_direction * 10, -3200, 0);
 			}
 
-			while (r_mode == M_ZOOM && r_direction > 0) {
-				r_direction--;
-				if (zoom > 500)
-					zoom -= 100;
-			}
-
-			while (r_mode == M_ZOOM && r_direction < 0) {
-				r_direction++;
-				if (zoom < 3300)
-					zoom += 100;
-			}
-
-			while (r_mode == M_OFFSET && r_direction > 0) {
-				r_direction--;
-				if (offset > -3300)
-					offset -= 33;
-			}
-
-			while (r_mode == M_OFFSET && r_direction < 0) {
-				r_direction++;
-				if (offset < 0)
-					offset += 33;
-			}
+			r_direction = 0;
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
