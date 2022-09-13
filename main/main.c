@@ -70,11 +70,29 @@ static uint8_t frame[ADC_BUFFER];
 static uint16_t volts_array[3][ADC_FRAME];
 static uint16_t *volts;
 
+
+/*
+ * UI
+ */
 static int zoom = 3300;
 static int offset = 0;
 
-float average = 3300 / 2;
-int averages[WIDTH] = {0};
+static float average = 3300 / 2;
+static int averages[WIDTH] = {0};
+
+static SemaphoreHandle_t ui_semaphore = NULL;
+static SemaphoreHandle_t paint_semaphore = NULL;
+
+
+/*
+ * Timing measurements
+ */
+static float time_to_math = 0;
+static float time_math = 0;
+static float time_plot = 0;
+static float time_adc = 0;
+static float time_to_paint = 0;
+static float time_paint = 0;
 
 
 /*
@@ -177,27 +195,29 @@ static void oscilloscope_loop(void *arg)
 		average = ((average * 31) + ((float)total / ADC_FRAME)) / 32;
 
 		TickType_t t1 = xTaskGetTickCount();
+		time_adc = (time_adc * 15 + t1 - t0) / 16;
 
-		ESP_LOGI(tag, "timing: %45s adc=%lu", "", t1 - t0);
+		xSemaphoreGive(ui_semaphore);
 	}
 }
 
 
-static void display_loop(void *arg)
+static void ui_loop(void *arg)
 {
 	unsigned bufno = 0;
-	int prev_hz = 0;
-	int prev_mode = -1;
 
 	while (1) {
+		TickType_t t0 = xTaskGetTickCount();
+		xSemaphoreTake(ui_semaphore, portMAX_DELAY);
+
+		TickType_t t1 = xTaskGetTickCount();
+
 		/* Use the next buffer, please. */
 		bufno = (bufno + 1) % 3;
 		volts = volts_array[bufno];
 
 		/* -2th is the current one. */
 		uint16_t *vs = volts_array[(bufno - 2) % 3];
-
-		TickType_t t0 = xTaskGetTickCount();
 
 		uint32_t total = 0;
 
@@ -224,11 +244,9 @@ static void display_loop(void *arg)
 		for (int i = 0; i < WIDTH; i++)
 			averages[i] = ((averages[i] << 3) - averages[i] + (vs[start + i] << 8)) >> 3;
 
-		TickType_t t1 = xTaskGetTickCount();
+		TickType_t t2 = xTaskGetTickCount();
 
 		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
-
-		int ap = PLOT * (average + offset) / zoom;
 
 		for (int i = start; i < start + WIDTH; i++) {
 			int avp = PLOT * ((averages[i - start] >> 8) + offset) / zoom;
@@ -238,43 +256,64 @@ static void display_loop(void *arg)
 			int vp = PLOT * (vs[i] + offset) / zoom;
 			if (vp >= 0 && vp < PLOT)
 				lcd_draw_pixel(i - start, CHROME + vp, WHITE);
-
-			if (ap >= 0 && ap < PLOT)
-				lcd_draw_pixel(i - start, CHROME + ap, i - start < 100 ? BLUE : GREEN);
 		}
 
-		TickType_t t2 = xTaskGetTickCount();
+		int ap = PLOT * (average + offset) / zoom;
 
-		if ((prev_hz != freq_hz) || (prev_mode != r_mode)) {
-			prev_hz = freq_hz;
-			prev_mode = r_mode;
+		if (ap >= 0 && ap < PLOT) {
+			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, BLUE);
+			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, GREEN);
 
-			lcd_draw_rect(0, 0, WIDTH - 1, CHROME - 1, DGRAY);
+			char buf[16];
+			sprintf(buf, "%i mV", (int)average);
 
-			char buf[32];
-
-			sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
-			//lcd_draw_string(tft, font, 2, 2, buf, BLUE);
-
-			if (r_mode == M_FREQ)
-				strcpy(buf, "freq.");
-			else if (r_mode == M_ZOOM)
-				strcpy(buf, "zoom");
-			else if (r_mode == M_OFFSET)
-				strcpy(buf, "offset");
-
-			//lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
+			if (ap > 16)
+				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap - 16, GREEN, buf);
+			else
+				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap + 16, GREEN, buf);
 		}
+
+		lcd_draw_rect(0, 0, WIDTH - 1, CHROME - 1, DGRAY);
+
+		char buf[32];
+
+		sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
+		lcd_draw_string(0, 0, BLUE, buf);
+
+		if (r_mode == M_FREQ)
+			strcpy(buf, "freq.");
+		else if (r_mode == M_ZOOM)
+			strcpy(buf, "zoom");
+		else if (r_mode == M_OFFSET)
+			strcpy(buf, "offset");
+
+		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, RED, buf);
 
 		TickType_t t3 = xTaskGetTickCount();
 
+		time_to_math = (time_to_math * 15 + t1 - t0) / 16;
+		time_math = (time_math * 15 + t2 - t1) / 16;
+		time_plot = (time_plot * 15 + t3 - t2) / 16;
+
+		xSemaphoreGive(paint_semaphore);
+		vTaskDelay(pdMS_TO_TICKS(1));
+	}
+}
+
+
+static void paint_loop(void *arg)
+{
+	while (1) {
+		TickType_t t0 = xTaskGetTickCount();
+		xSemaphoreTake(paint_semaphore, portMAX_DELAY);
+
+		TickType_t t1 = xTaskGetTickCount();
 		lcd_sync();
 
-		TickType_t t4 = xTaskGetTickCount();
+		TickType_t t2 = xTaskGetTickCount();
 
-		ESP_LOGI(tag, "timing: math=%-4lu plot=%-4lu chrome=%-4lu paint=%-4lu", t1 - t0, t2 - t1, t3 - t2, t4 - t3);
-
-		vTaskDelay(pdMS_TO_TICKS(30));
+		time_to_paint = (time_to_paint * 15 + t1 - t0) / 16;
+		time_paint = (time_paint * 15 + t2 - t1) / 16;
 	}
 }
 
@@ -411,6 +450,7 @@ void app_main(void)
 
 	ESP_LOGI(tag, "Initialize ILI9225 screen...");
 	lcd_init(SPI2_HOST, 17, 5, 16);
+	lcd_load_font("/spiffs/HaxorMedium-13.bin");
 
 	ESP_LOGI(tag, "Prepare ADC calibration...");
 	adc_cali_line_fitting_config_t cali_config = {
@@ -434,17 +474,29 @@ void app_main(void)
 	ESP_ERROR_CHECK(dac_cw_generator_config(&cw_config));
 	ESP_ERROR_CHECK(dac_cw_generator_enable());
 
+	ui_semaphore = xSemaphoreCreateBinary();
+	assert (NULL != ui_semaphore);
+
+	paint_semaphore = xSemaphoreCreateBinary();
+	assert (NULL != paint_semaphore);
+
 	ESP_LOGI(tag, "Start input processing task...");
 	xTaskCreate(input_loop, "input", 4096, NULL, 1, NULL);
 
-	ESP_LOGI(tag, "Start the display loop...");
-	xTaskCreate(display_loop, "display", 8192, NULL, 1, NULL);
+	ESP_LOGI(tag, "Start the UI loop...");
+	xTaskCreate(ui_loop, "ui", 4096, NULL, 1, NULL);
+
+	ESP_LOGI(tag, "Start the paint loop...");
+	xTaskCreate(paint_loop, "paint", 4096, NULL, 1, NULL);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
 	volts = volts_array[0];
 	xTaskCreate(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL);
 
 	while (1) {
-		vTaskDelay(pdMS_TO_TICKS(10000));
+		ESP_LOGI(tag, "timing: adc=%-2.1f to_math=%-2.1f math=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
+			 time_adc, time_to_math, time_math, time_plot, time_to_paint, time_paint);
+
+		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }

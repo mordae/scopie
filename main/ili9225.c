@@ -22,6 +22,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdint.h>
+#include <stdio.h>
 
 
 static const char *tag = "ili9225";
@@ -53,30 +54,33 @@ uint16_t lcd_palette[16] = {
 };
 
 /*
- * We are using triple buffering.
+ * We are using double buffering.
  *
  * One buffer is being written to by the client.
- * Previous buffer is being transmitted.
- * Last buffer is a reference for change detection.
+ * The other buffer is being transmitted.
  *
  * After every cycle the buffers are rotated.
  */
-static uint8_t buffer[3][LCD_Y_MAX][LCD_X_MAX / 2];
-static uint8_t (*reference)[LCD_Y_MAX][LCD_X_MAX / 2];
-static uint8_t (*committed)[LCD_Y_MAX][LCD_X_MAX / 2];
-static unsigned lcd_input_no = 0;
+static uint8_t buffer[2][LCD_HEIGHT][LCD_WIDTH / 2];
+static uint8_t (*committed)[LCD_HEIGHT][LCD_WIDTH / 2];
 
-uint8_t (*lcd_input)[LCD_Y_MAX][LCD_X_MAX / 2];
+uint8_t (*lcd_input)[LCD_HEIGHT][LCD_WIDTH / 2];
+
+
+/* Font is initially empty. */
+uint8_t lcd_font[256][16] = {0};
 
 
 /*
- * Static buffers for SPI transactions.
+ * Static buffers for SPI transactions. Must be at least 3,
+ * since the queue is TXBUF_COUNT - 2 to prevent clobbering.
+ * Using >4 does not translate to further speedup.
  */
 #define TXBUF_COUNT 4
 
 static spi_transaction_t *next_txbuf()
 {
-	static uint8_t txbufs[TXBUF_COUNT][sizeof(spi_transaction_t) + LCD_X_MAX * 2];
+	static uint8_t txbufs[TXBUF_COUNT][sizeof(spi_transaction_t) + LCD_WIDTH * 2];
 	static unsigned txbufno = 0;
 
 	spi_transaction_t *tx = (void *)txbufs[txbufno];
@@ -252,7 +256,7 @@ void lcd_init(spi_host_device_t host, int rs, int cs, int rst)
 	spi_device_interface_config_t config = {
 		.clock_speed_hz = SPI_MASTER_FREQ_40M,
 		.spics_io_num = cs,
-		.queue_size = TXBUF_COUNT - 1,
+		.queue_size = TXBUF_COUNT - 2,
 		.pre_cb = pre_cb,
 		.flags = SPI_DEVICE_NO_DUMMY,
 	};
@@ -274,10 +278,8 @@ void lcd_init(spi_host_device_t host, int rs, int cs, int rst)
 	gpio_set_direction(register_select, GPIO_MODE_OUTPUT);
 
 	ESP_LOGI(tag, "Arrange buffers...");
-	lcd_input_no = 0;
-	lcd_input = &buffer[lcd_input_no];
-	committed = &buffer[(lcd_input_no - 1) % 3];
-	reference = &buffer[(lcd_input_no - 2) % 3];
+	lcd_input = &buffer[0];
+	committed = &buffer[1];
 
 	ESP_LOGI(tag, "Begin preflight...");
 	preflight();
@@ -287,6 +289,24 @@ void lcd_init(spi_host_device_t host, int rs, int cs, int rst)
 
 	lcd_fill(0);
 	lcd_sync();
+}
+
+
+int lcd_load_font(const char *path)
+{
+	FILE *fp = fopen(path, "rb");
+
+	if (NULL == fp)
+		goto fail;
+
+	if (256 != fread(lcd_font, 16, 256, fp))
+		goto fail;
+
+	fclose(fp);
+	return 0;
+
+fail:
+	return -1;
 }
 
 
@@ -303,11 +323,11 @@ inline static uint8_t low(uint8_t x)
 
 void lcd_sync(void)
 {
-	lcd_input_no = (lcd_input_no + 1) % 3;
+	static uint8_t (*tmp)[LCD_HEIGHT][LCD_WIDTH / 2];
 
-	lcd_input = &buffer[lcd_input_no];
-	committed = &buffer[(lcd_input_no + 2) % 3];
-	reference = &buffer[(lcd_input_no + 1) % 3];
+	tmp       = committed;
+	committed = lcd_input;
+	lcd_input = tmp;
 
 	memcpy(*lcd_input, *committed, sizeof(*lcd_input));
 
@@ -315,10 +335,10 @@ void lcd_sync(void)
 	set_register(0x20, 0);
 	set_register(0x21, 0);
 
-	for (int y = 0; y < LCD_Y_MAX; y++) {
-		uint8_t txbuf[LCD_X_MAX * 2];
+	for (int y = 0; y < LCD_HEIGHT; y++) {
+		uint8_t txbuf[LCD_WIDTH * 2];
 
-		for (int x = 0; x < LCD_X_MAX / 2; x++) {
+		for (int x = 0; x < LCD_WIDTH / 2; x++) {
 			uint8_t twopix = (*committed)[y][x];
 
 			uint16_t left  = lcd_palette[(twopix >> 4) & 0b1111];
@@ -334,43 +354,138 @@ void lcd_sync(void)
 		write_register(0x22);
 
 		/* Send the line in buffer. */
-		write_buffer(txbuf, LCD_X_MAX * 2);
+		write_buffer(txbuf, LCD_WIDTH * 2);
+	}
+}
+
+
+struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y)
+{
+	struct lcd_point phys = {x, y};
+
+	switch (lcd_orientation) {
+		case LCD_ROTATE_0:
+			break;
+
+		case LCD_ROTATE_90:
+			phys.x = y;
+			phys.y = x;
+			break;
+
+		case LCD_ROTATE_180:
+			phys.x = LCD_WIDTH - x;
+			phys.y = LCD_HEIGHT - y;
+			break;
+
+		case LCD_ROTATE_270:
+			phys.x = LCD_WIDTH - y;
+			phys.y = LCD_HEIGHT - x;
+			break;
+
+		case LCD_MIRROR_X:
+			phys.x = LCD_WIDTH - x;
+			phys.y = y;
+			break;
+
+		case LCD_MIRROR_Y:
+			phys.x = x;
+			phys.y = LCD_HEIGHT - y;
+			break;
 	}
 
-#if 0
-	for (int y = 0; y < LCD_Y_MAX; y++) {
-		for (int x = 0; x < LCD_X_MAX / 2; x++) {
-			uint8_t twopix0 = (*reference)[y][x];
-			uint8_t twopix1 = (*committed)[y][x];
+	assert (phys.x >= 0);
+	assert (phys.x < LCD_WIDTH);
+	assert (phys.y >= 0);
+	assert (phys.y < LCD_HEIGHT);
 
-			if (twopix0 != twopix1) {
-				set_register(0x20, 2 * x);
-				set_register(0x21, y);
-				write_register(0x22);
+	return phys;
+}
 
-				uint8_t buf[4] = {
-					lcd_palette[high(twopix1)] >> 8,
-					lcd_palette[high(twopix1)],
-					lcd_palette[low(twopix1)] >> 8,
-					lcd_palette[low(twopix1)],
-				};
-				write_buffer(buf, 4);
-			}
 
-#if 0
-			if (high(twopix0) != high(twopix1)) {
-				set_register(0x20, 2 * x + 0);
-				set_register(0x21, y);
-				set_register(0x22, lcd_palette[high(twopix1)]);
-			}
+struct lcd_rect lcd_rect_to_phys(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
+{
+	struct lcd_point phys0 = lcd_point_to_phys(x0, y0);
+	struct lcd_point phys1 = lcd_point_to_phys(x1, y1);
+	struct lcd_rect phys = {
+		.x0 = phys0.x,
+		.y0 = phys0.y,
+		.x1 = phys1.x,
+		.y1 = phys1.y,
+	};
+	return phys;
+}
 
-			if (low(twopix0) != low(twopix1)) {
-				set_register(0x20, 2 * x + 1);
-				set_register(0x21, y);
-				set_register(0x22, lcd_palette[low(twopix1)]);
-			}
-#endif
+
+void lcd_draw_pixel(uint8_t x, uint8_t y, uint8_t color)
+{
+	struct lcd_point phys = lcd_point_to_phys(x, y);
+	uint8_t twopix = (*lcd_input)[phys.y][phys.x / 2];
+
+	if (phys.x & 1)
+		twopix = (twopix & 0b11110000) | ((color & 0b1111) << 0);
+	else
+		twopix = (twopix & 0b00001111) | ((color & 0b1111) << 4);
+
+	(*lcd_input)[phys.y][phys.x / 2] = twopix;
+}
+
+
+void lcd_draw_rect(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint8_t color)
+{
+	struct lcd_rect phys = lcd_rect_to_phys(x0, y0, x1, y1);
+
+	if (phys.x0 > phys.x1) {
+		phys.x0 ^= phys.x1;
+		phys.x1 ^= phys.x0;
+		phys.x0 ^= phys.x1;
+	}
+
+	if (phys.y0 > phys.y1) {
+		phys.y0 ^= phys.y1;
+		phys.y1 ^= phys.y0;
+		phys.y0 ^= phys.y1;
+	}
+
+	for (int y = phys.y0; y <= phys.y1; y++) {
+		for (int x = phys.x0; x <= phys.x1; x++) {
+			uint8_t twopix = (*lcd_input)[y][x / 2];
+
+			if (x & 1)
+				twopix = (twopix & 0b11110000) | ((color & 0b1111) << 0);
+			else
+				twopix = (twopix & 0b00001111) | ((color & 0b1111) << 4);
+
+			(*lcd_input)[y][x / 2] = twopix;
 		}
 	}
-#endif
+}
+
+
+void lcd_fill(uint8_t color)
+{
+	uint8_t twopix = ((color & 0b1111) << 4) | (color & 0b1111);
+	memset(*lcd_input, twopix, sizeof(*lcd_input));
+}
+
+
+void lcd_draw_glyph(uint8_t x, uint8_t y, uint8_t color, char c)
+{
+	uint8_t *glyph = lcd_font[(uint8_t)c];
+
+	for (int gx = 0; gx < 8; gx++) {
+		for (int gy = 0; gy < 16; gy++) {
+			if ((glyph[15 - gy] >> (7 - gx)) & 1) {
+				lcd_draw_pixel(x + gx, y + gy, color);
+			}
+		}
+	}
+}
+
+
+void lcd_draw_string(uint8_t x, uint8_t y, uint8_t color, const char *str)
+{
+	int len = strlen(str);
+
+	for (int i = 0; i < len; i++)
+		lcd_draw_glyph(x + i * 8, y, color, str[i]);
 }

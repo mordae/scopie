@@ -23,8 +23,8 @@
 /*
  * Dimensions of this particular screen in hardware coordinates.
  */
-#define LCD_X_MAX 176
-#define LCD_Y_MAX 220
+#define LCD_WIDTH 176
+#define LCD_HEIGHT 220
 
 
 /*
@@ -88,6 +88,13 @@ inline static uint16_t lcd_rgb(uint8_t r, uint8_t g, uint8_t b)
 
 
 /*
+ * Modified latin 16x8 bitmap font.
+ * Populate it with lcd_load_font().
+ */
+extern uint8_t lcd_font[256][16];
+
+
+/*
  * Initialize the screen.
  *
  * The SPI master parameter is mandatory. You must use spi_bus_initialize()
@@ -99,6 +106,14 @@ inline static uint16_t lcd_rgb(uint8_t r, uint8_t g, uint8_t b)
  * You can give a RST pin number or leave it at -1.
  */
 void lcd_init(spi_host_device_t host, int rs, int cs, int rst);
+
+
+/*
+ * Load the font into memory.
+ * Expects path to a file with 256x16 bytes.
+ * Every glyph has 16 rows and 8 columns.
+ */
+int lcd_load_font(const char *path);
 
 
 /*
@@ -116,7 +131,7 @@ void lcd_sync(void);
  * Here goes whatever should be on the screen.
  * First come the Y rows, then the X columns.
  */
-extern uint8_t (*lcd_input)[LCD_Y_MAX][LCD_X_MAX / 2];
+extern uint8_t (*lcd_input)[LCD_HEIGHT][LCD_WIDTH / 2];
 
 
 /* Coordinates for a point. */
@@ -134,118 +149,43 @@ struct lcd_rect {
 /*
  * Transfer coordinates from virtual space to the physical space.
  */
-inline static struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y)
-{
-	struct lcd_point phys = {x, y};
-
-	switch (lcd_orientation) {
-		case LCD_ROTATE_0:
-			break;
-
-		case LCD_ROTATE_90:
-			phys.x = y;
-			phys.y = x;
-			return phys;
-
-		case LCD_ROTATE_180:
-			phys.x = LCD_X_MAX - x;
-			phys.y = LCD_Y_MAX - y;
-			return phys;
-
-		case LCD_ROTATE_270:
-			phys.x = LCD_X_MAX - y;
-			phys.y = LCD_Y_MAX - x;
-			return phys;
-
-		case LCD_MIRROR_X:
-			phys.x = LCD_X_MAX - x;
-			phys.y = y;
-			return phys;
-
-		case LCD_MIRROR_Y:
-			phys.x = x;
-			phys.y = LCD_Y_MAX - y;
-			return phys;
-	}
-
-	return phys;
-}
+struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y);
 
 
 /*
  * Transfer coordinates from virtual space to the physical space,
  * but for a whole rectangle.
  */
-inline static struct lcd_rect lcd_rect_to_phys(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
-{
-	struct lcd_point phys0 = lcd_point_to_phys(x0, y0);
-	struct lcd_point phys1 = lcd_point_to_phys(x1, y1);
-	struct lcd_rect phys = {
-		.x0 = phys0.x,
-		.y0 = phys0.y,
-		.x1 = phys1.x,
-		.y1 = phys1.y,
-	};
-	return phys;
-}
+struct lcd_rect lcd_rect_to_phys(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1);
 
 
 /*
  * Color a single pixel.
  */
-inline static void lcd_draw_pixel(uint8_t x, uint8_t y, uint8_t color)
-{
-	struct lcd_point phys = lcd_point_to_phys(x, y);
-	uint8_t twopix = (*lcd_input)[phys.y][phys.x / 2];
-
-	if (phys.x & 1)
-		twopix = (twopix & 0b11110000) | ((color & 0b1111) << 0);
-	else
-		twopix = (twopix & 0b00001111) | ((color & 0b1111) << 4);
-
-	(*lcd_input)[phys.y][phys.x / 2] = twopix;
-}
+void lcd_draw_pixel(uint8_t x, uint8_t y, uint8_t color);
 
 
 /*
  * Color a whole rect of pixels.
  */
-inline static void lcd_draw_rect(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint8_t color)
-{
-	struct lcd_rect phys = lcd_rect_to_phys(x0, y0, x1, y1);
-
-	if (phys.x0 > phys.x1) {
-		phys.x0 ^= phys.x1;
-		phys.x1 ^= phys.x0;
-		phys.x0 ^= phys.x1;
-	}
-
-	if (phys.y0 > phys.y1) {
-		phys.y0 ^= phys.y1;
-		phys.y1 ^= phys.y0;
-		phys.y0 ^= phys.y1;
-	}
-
-	for (int y = phys.y0; y <= phys.y1; y++) {
-		for (int x = phys.x0; x <= phys.x1; x++) {
-			uint8_t twopix = (*lcd_input)[y][x / 2];
-
-			if (x & 1)
-				twopix = (twopix & 0b11110000) | ((color & 0b1111) << 0);
-			else
-				twopix = (twopix & 0b00001111) | ((color & 0b1111) << 4);
-
-			(*lcd_input)[y][x / 2] = twopix;
-		}
-	}
-}
+void lcd_draw_rect(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, uint8_t color);
 
 
 /*
  * Paint the whole screen with a single color.
  */
-inline static void lcd_fill(uint8_t color)
-{
-	uint8_t twopix = ((color & 0b1111) << 4) | (color & 0b1111);
-	memset(*lcd_input, twopix, sizeof(*lcd_input));
-}
+void lcd_fill(uint8_t color);
+
+
+/*
+ * Draw given glyph at specified coordinates.
+ * The coordinates indicate bottom left of the glyph.
+ */
+void lcd_draw_glyph(uint8_t x, uint8_t y, uint8_t color, char c);
+
+
+/*
+ * Draw given string at specified coordinates.
+ * The coordinates indicate bottom left of the string.
+ */
+void lcd_draw_string(uint8_t x, uint8_t y, uint8_t color, const char *str);
