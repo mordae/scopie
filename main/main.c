@@ -14,8 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "ili9340.h"
-#include "fontx.h"
+#include "ili9225.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,15 +35,24 @@
 
 static const char *tag = "main";
 
+
 /*
  * Display
  */
 #define WIDTH	220
 #define HEIGHT	176
-#define PLOT	150
+#define PLOT	160
+#define CHROME	16
 
-static fontx_file_t font[1];
-static tft_t tft[1];
+enum {
+	BLACK = 0,
+	DGRAY, LGRAY, WHITE,
+	RED, GREEN, BLUE,
+	LRED, LGREEN, LBLUE,
+	YELLOW, CYAN, PURPLE,
+	DYELLOW, DCYAN, DPURPLE,
+};
+
 
 /*
  * ADC
@@ -145,6 +153,9 @@ static void oscilloscope_loop(void *arg)
 		cadc_before_read();
 
 		uint32_t size = 0;
+
+		TickType_t t0 = xTaskGetTickCount();
+
 		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame, ADC_BUFFER, &size, 1000));
 
 		if (size < ADC_BUFFER) {
@@ -164,6 +175,10 @@ static void oscilloscope_loop(void *arg)
 		}
 
 		average = ((average * 31) + ((float)total / ADC_FRAME)) / 32;
+
+		TickType_t t1 = xTaskGetTickCount();
+
+		ESP_LOGI(tag, "timing: %45s adc=%lu", "", t1 - t0);
 	}
 }
 
@@ -181,6 +196,8 @@ static void display_loop(void *arg)
 
 		/* -2th is the current one. */
 		uint16_t *vs = volts_array[(bufno - 2) % 3];
+
+		TickType_t t0 = xTaskGetTickCount();
 
 		uint32_t total = 0;
 
@@ -207,34 +224,37 @@ static void display_loop(void *arg)
 		for (int i = 0; i < WIDTH; i++)
 			averages[i] = ((averages[i] << 3) - averages[i] + (vs[start + i] << 8)) >> 3;
 
-		for (int i = start; i < start + WIDTH; i++) {
-			uint16_t colors[PLOT] = {BLACK};
+		TickType_t t1 = xTaskGetTickCount();
 
+		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
+
+		int ap = PLOT * (average + offset) / zoom;
+
+		for (int i = start; i < start + WIDTH; i++) {
 			int avp = PLOT * ((averages[i - start] >> 8) + offset) / zoom;
 			if (avp >= 0 && avp < PLOT)
-				colors[avp] = PURPLE & GRAY;
+				lcd_draw_pixel(i - start, CHROME + avp, DPURPLE);
 
 			int vp = PLOT * (vs[i] + offset) / zoom;
 			if (vp >= 0 && vp < PLOT)
-				colors[vp] = WHITE;
+				lcd_draw_pixel(i - start, CHROME + vp, WHITE);
 
-			int ap = PLOT * (average + offset) / zoom;
 			if (ap >= 0 && ap < PLOT)
-				colors[ap] = i - start < 100 ? BLUE : GREEN;
-
-			lcd_draw_multi_pixels(tft, HEIGHT - PLOT, i - start, PLOT, colors);
+				lcd_draw_pixel(i - start, CHROME + ap, i - start < 100 ? BLUE : GREEN);
 		}
+
+		TickType_t t2 = xTaskGetTickCount();
 
 		if ((prev_hz != freq_hz) || (prev_mode != r_mode)) {
 			prev_hz = freq_hz;
 			prev_mode = r_mode;
 
-			lcd_draw_fill_rect(tft, 0, 0, HEIGHT - PLOT - 1, WIDTH, DARK);
+			lcd_draw_rect(0, 0, WIDTH - 1, CHROME - 1, DGRAY);
 
 			char buf[32];
 
 			sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
-			lcd_draw_string(tft, font, 2, 2, buf, BLUE);
+			//lcd_draw_string(tft, font, 2, 2, buf, BLUE);
 
 			if (r_mode == M_FREQ)
 				strcpy(buf, "freq.");
@@ -243,8 +263,18 @@ static void display_loop(void *arg)
 			else if (r_mode == M_OFFSET)
 				strcpy(buf, "offset");
 
-			lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
+			//lcd_draw_string(tft, font, 2, WIDTH - (8 * strlen(buf)), buf, RED);
 		}
+
+		TickType_t t3 = xTaskGetTickCount();
+
+		lcd_sync();
+
+		TickType_t t4 = xTaskGetTickCount();
+
+		ESP_LOGI(tag, "timing: math=%-4lu plot=%-4lu chrome=%-4lu paint=%-4lu", t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+
+		vTaskDelay(pdMS_TO_TICKS(30));
 	}
 }
 
@@ -372,14 +402,15 @@ void app_main(void)
 	};
 	ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
 
-	ESP_LOGI(tag, "Load font...");
-	fontx_init(font, "/spiffs/ILGH16XB.FNT", "");
+	ESP_LOGI(tag, "Initialize SPI2 host...");
+	spi_bus_config_t spi_config = {
+		.mosi_io_num = 19,
+		.sclk_io_num = 18,
+	};
+	ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &spi_config, SPI_DMA_CH_AUTO));
 
-	ESP_LOGI(tag, "Initialize screen...");
-	spi_master_init(tft, 19, 18, 5, 17, 16, -1, -1, -1);
-	lcd_init(tft, 0x9225, HEIGHT, WIDTH, 0, 0);
-	lcd_set_font_direction(tft, DIRECTION90);
-	lcd_fill_screen(tft, BLACK);
+	ESP_LOGI(tag, "Initialize ILI9225 screen...");
+	lcd_init(SPI2_HOST, 17, 5, 16);
 
 	ESP_LOGI(tag, "Prepare ADC calibration...");
 	adc_cali_line_fitting_config_t cali_config = {
@@ -404,14 +435,14 @@ void app_main(void)
 	ESP_ERROR_CHECK(dac_cw_generator_enable());
 
 	ESP_LOGI(tag, "Start input processing task...");
-	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 2, NULL, 0);
+	xTaskCreate(input_loop, "input", 4096, NULL, 1, NULL);
 
 	ESP_LOGI(tag, "Start the display loop...");
-	xTaskCreatePinnedToCore(display_loop, "display", 4096, NULL, 1, NULL, 0);
+	xTaskCreate(display_loop, "display", 8192, NULL, 1, NULL);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
 	volts = volts_array[0];
-	xTaskCreatePinnedToCore(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL, 1);
+	xTaskCreate(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL);
 
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(10000));
