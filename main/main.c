@@ -26,6 +26,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_continuous.h"
+#include "esp_freertos_hooks.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
@@ -75,7 +76,7 @@ static uint16_t *volts;
 
 
 /*
- * UI
+ * GUI
  */
 static int zoom = 3300;
 static int offset = 0;
@@ -187,7 +188,7 @@ static void oscilloscope_loop(void *arg)
 }
 
 
-static void ui_loop(void *arg)
+static void gui_loop(void *arg)
 {
 	unsigned bufno = 0;
 
@@ -398,6 +399,22 @@ static void input_loop(void *arg)
 }
 
 
+static unsigned idle_cpu0 = 0;
+static unsigned idle_cpu1 = 0;
+
+static bool add_idle_cpu0(void)
+{
+	idle_cpu0++;
+	return true;
+}
+
+static bool add_idle_cpu1(void)
+{
+	idle_cpu1++;
+	return true;
+}
+
+
 void app_main(void)
 {
 	ESP_LOGI(tag, "Initialize SPIFFS...");
@@ -448,17 +465,20 @@ void app_main(void)
 	assert (NULL != paint_semaphore);
 
 	ESP_LOGI(tag, "Start input processing task...");
-	xTaskCreate(input_loop, "input", 4096, NULL, 1, NULL);
+	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 1, NULL, 0);
 
-	ESP_LOGI(tag, "Start the UI loop...");
-	xTaskCreate(ui_loop, "ui", 4096, NULL, 1, NULL);
+	ESP_LOGI(tag, "Start the GUI loop...");
+	xTaskCreatePinnedToCore(gui_loop, "gui", 4096, NULL, 1, NULL, 1);
 
 	ESP_LOGI(tag, "Start the paint loop...");
-	xTaskCreate(paint_loop, "paint", 4096, NULL, 1, NULL);
+	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 1, NULL, 0);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
 	volts = volts_array[0];
-	xTaskCreate(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL);
+	xTaskCreatePinnedToCore(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL, 0);
+
+	ESP_ERROR_CHECK(esp_register_freertos_idle_hook_for_cpu(add_idle_cpu0, 0));
+	ESP_ERROR_CHECK(esp_register_freertos_idle_hook_for_cpu(add_idle_cpu1, 1));
 
 	while (1) {
 		ESP_LOGI(tag, "timing: adc=%-2.1f to_math=%-2.1f math=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
@@ -470,6 +490,9 @@ void app_main(void)
 		ESP_LOGI(tag, "memory: free=%zu used=%zu watermark=%zu largest=%zu",
 		         heap.total_free_bytes, heap.total_allocated_bytes,
 			 heap.minimum_free_bytes, heap.largest_free_block);
+
+		ESP_LOGI(tag, "  idle: cpu0=%u cpu1=%u", idle_cpu0 / 2, idle_cpu1 / 2);
+		idle_cpu0 = idle_cpu1 = 0;
 
 		vTaskDelay(pdMS_TO_TICKS(2000));
 	}
