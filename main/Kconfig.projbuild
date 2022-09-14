@@ -1,0 +1,87 @@
+menu "Scopie"
+	menu "ADC"
+		config ADC_3V3_CH
+			int "ADC1 Channel for 3.3V Input"
+			default 6
+			range 0 7
+
+		config ADC_33V_CH
+			int "ADC1 Channel for 33V Input"
+			default 7
+			range -1 7
+	endmenu
+
+	menu "LCD - ILI9225"
+		config LCD_RS_PIN
+			int "RS Pin"
+			default 19
+			range 0 46
+
+		config LCD_RST_PIN
+			int "RST Pin"
+			default 22
+			range -1 46
+	endmenu
+
+	menu "Rotary Encoders"
+		config RE1_SW_PIN
+			int "Rotary Encoder 1 - Switch Pin"
+			default 27
+			range 0 46
+
+		config RE1_LEFT_PIN
+			int "Rotary Encoder 1 - Left Pin"
+			default 33
+			range 0 46
+
+		config RE1_RIGHT_PIN
+			int "Rotary Encoder 1 - Right Pin"
+			default 32
+			range 0 46
+
+		config RE2_SW_PIN
+			int "Rotary Encoder 2 - Switch Pin"
+			default 14
+			range -1 46
+
+		config RE2_LEFT_PIN
+			int "Rotary Encoder 2 - Left Pin"
+			default 13
+			range -1 46
+
+		config RE2_RIGHT_PIN
+			int "Rotary Encoder 2 - Right Pin"
+			default 12
+			range -1 46
+
+		config RE3_SW_PIN
+			int "Rotary Encoder 3 - Switch Pin"
+			default 21
+			range -1 46
+
+		config RE3_LEFT_PIN
+			int "Rotary Encoder 3 - Left Pin"
+			default 17
+			range -1 46
+
+		config RE3_RIGHT_PIN
+			int "Rotary Encoder 3 - Right Pin"
+			default 4
+			range -1 46
+
+		config RE4_SW_PIN
+			int "Rotary Encoder 4 - Switch Pin"
+			default 0
+			range -1 46
+
+		config RE4_LEFT_PIN
+			int "Rotary Encoder 4 - Left Pin"
+			default 15
+			range -1 46
+
+		config RE4_RIGHT_PIN
+			int "Rotary Encoder 4 - Right Pin"
+			default 16
+			range -1 46
+	endmenu
+endmenu

@@ -154,7 +154,7 @@ static void cadc_before_read(void)
 	dig_cfg.adc_pattern = adc_pattern;
 
 	adc_pattern[0].unit = ADC_UNIT_1;
-	adc_pattern[0].channel = ADC_CHANNEL_6;
+	adc_pattern[0].channel = CONFIG_ADC_3V3_CH;
 	adc_pattern[0].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
 	adc_pattern[0].atten = ADC_ATTEN_DB_11;
 
@@ -332,7 +332,7 @@ static int clamp(int x, int min, int max)
 
 static void rotary_change(void *arg)
 {
-	r_pressed = !gpio_get_level(13);
+	r_pressed = !gpio_get_level(CONFIG_RE1_SW_PIN);
 
 	const uint8_t r_table[6][4] = {
 		{R_START_M,           R_CW_BEGIN,     R_CCW_BEGIN,  R_START},
@@ -343,8 +343,11 @@ static void rotary_change(void *arg)
 		{R_START_M,           R_CCW_BEGIN_M,  R_START_M,    R_START},
 	};
 
-	uint8_t pinstate = (!gpio_get_level(4) << 1) | (!gpio_get_level(2));
-	r_state = r_table[r_state & 0xf][pinstate];
+	uint8_t left = !gpio_get_level(CONFIG_RE1_LEFT_PIN);
+	uint8_t right = !gpio_get_level(CONFIG_RE1_RIGHT_PIN);
+
+	uint8_t pin_state = (left << 1) | right;
+	r_state = r_table[r_state & 0xf][pin_state];
 
 	if (r_state & (DIR_CW | DIR_CCW)) {
 		static TickType_t prev = 0;
@@ -378,12 +381,14 @@ static void input_loop(void *arg)
 	ESP_LOGI(tag, "Register input handlers...");
 	ESP_ERROR_CHECK(gpio_install_isr_service(0));
 
-	ESP_ERROR_CHECK(gpio_isr_handler_add(2, rotary_change, NULL));
-	ESP_ERROR_CHECK(gpio_isr_handler_add(4, rotary_change, NULL));
-	ESP_ERROR_CHECK(gpio_isr_handler_add(13, rotary_change, NULL));
+	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_SW_PIN, rotary_change, NULL));
+	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_LEFT_PIN, rotary_change, NULL));
+	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_RIGHT_PIN, rotary_change, NULL));
 
 	gpio_config_t config = {
-		.pin_bit_mask = BIT64(4) | BIT64(2) | BIT64(13),
+		.pin_bit_mask = BIT64(CONFIG_RE1_SW_PIN)
+		              | BIT64(CONFIG_RE1_LEFT_PIN)
+		              | BIT64(CONFIG_RE1_RIGHT_PIN),
 		.mode = GPIO_MODE_INPUT,
 		.pull_up_en = 1,
 		.intr_type = GPIO_INTR_ANYEDGE,
@@ -441,15 +446,15 @@ void app_main(void)
 	};
 	ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
 
-	ESP_LOGI(tag, "Initialize SPI2 host...");
+	ESP_LOGI(tag, "Initialize SPI3 host...");
 	spi_bus_config_t spi_config = {
-		.mosi_io_num = 19,
+		.mosi_io_num = 23,
 		.sclk_io_num = 18,
 	};
-	ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &spi_config, SPI_DMA_CH_AUTO));
+	ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &spi_config, SPI_DMA_CH_AUTO));
 
 	ESP_LOGI(tag, "Initialize ILI9225 screen...");
-	lcd_init(SPI2_HOST, 17, 5, 16);
+	lcd_init(CONFIG_LCD_RS_PIN, CONFIG_LCD_RST_PIN);
 	lcd_load_font("/spiffs/HaxorMedium-13.bin");
 
 	ESP_LOGI(tag, "Prepare ADC calibration...");

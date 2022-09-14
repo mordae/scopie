@@ -97,15 +97,10 @@ extern uint8_t lcd_font[256][16];
 /*
  * Initialize the screen.
  *
- * The SPI master parameter is mandatory. You must use spi_bus_initialize()
- * to configure the SPI master before you call this function.
- *
- * You must also provide the Register Select GPIO pin number.
- *
- * You can give a CS pin number or leave it at -1.
- * You can give a RST pin number or leave it at -1.
+ * You must provide the Register Select GPIO pin number.
+ * You can provide a RST pin number or leave it at -1.
  */
-void lcd_init(spi_host_device_t host, int rs, int cs, int rst);
+void lcd_init(int rs, int rst);
 
 
 /*

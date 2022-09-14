@@ -250,17 +250,17 @@ static void pre_cb(spi_transaction_t *tx)
 }
 
 
-void lcd_init(spi_host_device_t host, int rs, int cs, int rst)
+void lcd_init(int rs, int rst)
 {
-	ESP_LOGI(tag, "Configure SPI device (host=%i, cs=%i)...", host, cs);
+	ESP_LOGI(tag, "Configure SPI device (SPI3, cs=5)...");
 	spi_device_interface_config_t config = {
 		.clock_speed_hz = SPI_MASTER_FREQ_40M,
-		.spics_io_num = cs,
+		.spics_io_num = 5,
 		.queue_size = TXBUF_COUNT - 2,
 		.pre_cb = pre_cb,
 		.flags = SPI_DEVICE_NO_DUMMY,
 	};
-	ESP_ERROR_CHECK(spi_bus_add_device(host, &config, &dev));
+	ESP_ERROR_CHECK(spi_bus_add_device(SPI3_HOST, &config, &dev));
 
 	if (rst >= 0) {
 		gpio_reset_pin(rst);
