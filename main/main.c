@@ -26,6 +26,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_continuous.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_vfs.h"
@@ -463,6 +464,13 @@ void app_main(void)
 		ESP_LOGI(tag, "timing: adc=%-2.1f to_math=%-2.1f math=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
 			 time_adc, time_to_math, time_math, time_plot, time_to_paint, time_paint);
 
-		vTaskDelay(pdMS_TO_TICKS(1000));
+		multi_heap_info_t heap;
+		heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);
+
+		ESP_LOGI(tag, "memory: free=%zu used=%zu watermark=%zu largest=%zu",
+		         heap.total_free_bytes, heap.total_allocated_bytes,
+			 heap.minimum_free_bytes, heap.largest_free_block);
+
+		vTaskDelay(pdMS_TO_TICKS(2000));
 	}
 }
