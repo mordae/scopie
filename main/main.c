@@ -62,6 +62,8 @@ enum {
  */
 #define ADC_FRAME 1000
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
+#define ADC_SCALE 3500
+#define ADC_MULT 2
 
 static int freq_hz = 100000;
 static int cw_freq = 50320;
@@ -78,10 +80,10 @@ static uint16_t *volts;
 /*
  * GUI
  */
-static int zoom = 3300;
+static int zoom = ADC_SCALE;
 static int offset = 0;
 
-static float average = 3300 / 2;
+static float average = ADC_SCALE / 2;
 static int averages[WIDTH] = {0};
 
 static SemaphoreHandle_t ui_semaphore = NULL;
@@ -140,9 +142,9 @@ static void cadc_before_read(void)
 	dig_cfg.adc_pattern = adc_pattern;
 
 	adc_pattern[0].unit = ADC_UNIT_1;
-	adc_pattern[0].channel = CONFIG_ADC_3V3_CH;
+	adc_pattern[0].channel = CONFIG_ADC_CH;
 	adc_pattern[0].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
-	adc_pattern[0].atten = ADC_ATTEN_DB_11;
+	adc_pattern[0].atten = ADC_ATTEN_DB_6;
 
 	ESP_ERROR_CHECK(adc_continuous_config(cadc, &dig_cfg));
 	ESP_ERROR_CHECK(adc_continuous_start(cadc));
@@ -174,6 +176,7 @@ static void oscilloscope_loop(void *arg)
 			adc_digi_output_data_t *p = (void *)(frame + i);
 			int vs = 0;
 			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &vs));
+			vs *= ADC_MULT;
 			*voltsptr++ = vs;
 			total += vs;
 		}
@@ -373,9 +376,9 @@ static void input_loop(void *arg)
 		}
 
 		if (M_ZOOM == mode) {
-			zoom = clamp(zoom - green_steps, 500, 3300);
+			zoom = clamp(zoom - green_steps, 500, ADC_SCALE);
 		} else if (M_OFFSET == mode) {
-			offset = clamp(offset - green_steps, -3200, 0);
+			offset = clamp(offset - green_steps, -ADC_SCALE, 0);
 		}
 
 		if (blue_steps) {
@@ -439,7 +442,7 @@ void app_main(void)
 	ESP_LOGI(tag, "Prepare ADC calibration...");
 	adc_cali_line_fitting_config_t cali_config = {
 		.unit_id = ADC_UNIT_1,
-		.atten = ADC_ATTEN_DB_11,
+		.atten = ADC_ATTEN_DB_6,
 		.bitwidth = SOC_ADC_DIGI_MAX_BITWIDTH,
 	};
 	ESP_ERROR_CHECK(adc_cali_create_scheme_line_fitting(&cali_config, &cali));

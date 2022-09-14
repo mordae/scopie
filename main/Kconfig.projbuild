@@ -1,14 +1,9 @@
 menu "Scopie"
 	menu "ADC"
-		config ADC_3V3_CH
-			int "ADC1 Channel for 3.3V Input"
+		config ADC_CH
+			int "ADC1 Input Channel"
 			default 6
 			range 0 7
-
-		config ADC_33V_CH
-			int "ADC1 Channel for 33V Input"
-			default 7
-			range -1 7
 	endmenu
 
 	menu "LCD - ILI9225"
