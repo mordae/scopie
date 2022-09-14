@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 
 #include "driver/dac_common.h"
+#include "driver/ledc.h"
 #include "soc/dac_channel.h"
 
 #include "esp_adc/adc_cali.h"
@@ -60,13 +61,14 @@ enum {
 /*
  * ADC
  */
+#define ADC_BITWIDTH 10
 #define ADC_FRAME 1000
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
 #define ADC_SCALE 3500
 #define ADC_MULT 2
 
-static int freq_hz = 100000;
-static int cw_freq = 50320;
+static int freq_hz = 10000;
+static int signal_freq = 1000;
 
 static adc_continuous_handle_t cadc;
 static adc_cali_handle_t cali;
@@ -89,6 +91,8 @@ static int averages[WIDTH] = {0};
 static SemaphoreHandle_t ui_semaphore = NULL;
 static SemaphoreHandle_t paint_semaphore = NULL;
 
+static TickType_t show_signal_freq_until = 0;
+
 
 /*
  * Timing measurements
@@ -105,12 +109,21 @@ static float time_paint = 0;
  * Rotary encoder.
  */
 enum {
-	M_ZOOM = 0,
-	M_OFFSET,
-	M_MAX,
+	MODE_SIGNAL = 0,
+	MODE_OFFSET,
+	MODE_ZOOM,
+	MODE_MAX,
 };
 
-static volatile int mode = M_ZOOM;
+static volatile int mode = 0;
+
+enum {
+	SIGNAL_CW = 0,
+	SIGNAL_PWM,
+	SIGNAL_MAX,
+};
+
+static volatile int signal_type = 0;
 
 
 static void cadc_before_read(void)
@@ -132,7 +145,7 @@ static void cadc_before_read(void)
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
 
 	adc_continuous_config_t dig_cfg = {
-		.sample_freq_hz = freq_hz,
+		.sample_freq_hz = freq_hz * ADC_BITWIDTH,
 		.conv_mode = ADC_CONV_SINGLE_UNIT_1,
 		.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
 	};
@@ -143,7 +156,7 @@ static void cadc_before_read(void)
 
 	adc_pattern[0].unit = ADC_UNIT_1;
 	adc_pattern[0].channel = CONFIG_ADC_CH;
-	adc_pattern[0].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+	adc_pattern[0].bit_width = ADC_BITWIDTH;
 	adc_pattern[0].atten = ADC_ATTEN_DB_6;
 
 	ESP_ERROR_CHECK(adc_continuous_config(cadc, &dig_cfg));
@@ -250,8 +263,7 @@ static void gui_loop(void *arg)
 		int ap = PLOT * (average + offset) / zoom;
 
 		if (ap >= 0 && ap < PLOT) {
-			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, LRED);
-			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
+			lcd_draw_rect(0, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
 
 			char buf[16];
 			sprintf(buf, "%i mV", (int)average);
@@ -266,13 +278,20 @@ static void gui_loop(void *arg)
 
 		char buf[32];
 
-		sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
-		lcd_draw_string(0, 0, LRED, buf);
+		if (show_signal_freq_until > xTaskGetTickCount()) {
+			sprintf(buf, "%i.%.3i kHz", signal_freq / 1000, signal_freq % 1000);
+			lcd_draw_string(0, 0, LBLUE, buf);
+		} else {
+			sprintf(buf, "%i.%.3i kHz", freq_hz / 1000, freq_hz % 1000);
+			lcd_draw_string(0, 0, LRED, buf);
+		}
 
-		if (mode == M_ZOOM)
+		if (mode == MODE_ZOOM)
 			strcpy(buf, "zoom");
-		else if (mode == M_OFFSET)
+		else if (mode == MODE_OFFSET)
 			strcpy(buf, "offset");
+		else if (mode == MODE_SIGNAL)
+			strcpy(buf, "signal");
 
 		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, WHITE, buf);
 
@@ -317,6 +336,75 @@ static int clamp(int x, int min, int max)
 }
 
 
+static void reset_signal()
+{
+	static int prev_type = -1;
+	static int prev_freq = -1;
+
+	if (SIGNAL_PWM == signal_type && signal_freq < 550)
+		signal_freq = 550;
+
+	if (SIGNAL_CW == signal_type && signal_freq < 130)
+		signal_freq = 130;
+
+	if (SIGNAL_CW == signal_type && signal_freq > 55000)
+		signal_freq = 55000;
+
+	if (prev_type == signal_type && prev_freq == signal_freq)
+		return;
+
+	if (SIGNAL_CW == prev_type) {
+		ESP_ERROR_CHECK(dac_cw_generator_disable());
+		ESP_ERROR_CHECK(dac_output_disable(DAC_GPIO26_CHANNEL));
+		gpio_reset_pin(26);
+	}
+
+	if (SIGNAL_PWM == prev_type) {
+		ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, 0, 0));
+		gpio_reset_pin(25);
+	}
+
+	if (SIGNAL_CW == signal_type) {
+		dac_cw_config_t cw_config = {
+			.en_ch = DAC_GPIO26_CHANNEL,
+			.scale = DAC_CW_SCALE_1,
+			.phase = DAC_CW_PHASE_0,
+			.freq = signal_freq,
+			.offset = 0,
+		};
+		ESP_ERROR_CHECK(dac_cw_generator_config(&cw_config));
+		ESP_ERROR_CHECK(dac_cw_generator_enable());
+		dac_output_enable(DAC_GPIO26_CHANNEL);
+	}
+
+	if (SIGNAL_PWM == signal_type) {
+		ledc_timer_config_t ledc_timer = {
+			.duty_resolution = LEDC_TIMER_1_BIT,
+			.freq_hz = signal_freq,
+			.speed_mode = LEDC_LOW_SPEED_MODE,
+			.timer_num = LEDC_TIMER_0,
+			.clk_cfg = LEDC_AUTO_CLK,
+		};
+		ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+		ledc_channel_config_t ledc_channel = {
+			.gpio_num   = 25,
+			.channel    = 0,
+			.duty       = 1,
+			.speed_mode = LEDC_LOW_SPEED_MODE,
+			.timer_sel  = LEDC_TIMER_0,
+		};
+		ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+	}
+
+	if (prev_type != signal_type || prev_freq != signal_freq)
+		show_signal_freq_until = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+
+	prev_type = signal_type;
+	prev_freq = signal_freq;
+}
+
+
 static void input_loop(void *arg)
 {
 	ESP_LOGI(tag, "Register input handlers...");
@@ -340,7 +428,7 @@ static void input_loop(void *arg)
 	int blue = rotary_add(CONFIG_RE4_SW_PIN,
 	                      CONFIG_RE4_LEFT_PIN,
 	                      CONFIG_RE4_RIGHT_PIN,
-	                      100);
+	                      200);
 
 	assert (red >= 0);
 	assert (green >= 0);
@@ -353,12 +441,12 @@ static void input_loop(void *arg)
 		int white_steps = rotary_read_steps(white);
 		int blue_steps = rotary_read_steps(blue);
 
-		freq_hz = clamp(freq_hz + red_steps * 10,
-				SOC_ADC_SAMPLE_FREQ_THRES_LOW,
-				SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
+		freq_hz = clamp(freq_hz + red_steps,
+				SOC_ADC_SAMPLE_FREQ_THRES_LOW / ADC_BITWIDTH,
+				SOC_ADC_SAMPLE_FREQ_THRES_HIGH / ADC_BITWIDTH);
 
 		while (white_steps > 0) {
-			if (mode + 1 >= M_MAX)
+			if (mode + 1 >= MODE_MAX)
 				mode = 0;
 			else
 				mode += 1;
@@ -368,33 +456,43 @@ static void input_loop(void *arg)
 
 		while (white_steps < 0) {
 			if (mode - 1 < 0)
-				mode = M_MAX - 1;
+				mode = MODE_MAX - 1;
 			else
 				mode--;
 
 			white_steps++;
 		}
 
-		if (M_ZOOM == mode) {
+		if (MODE_ZOOM == mode) {
 			zoom = clamp(zoom - green_steps, 500, ADC_SCALE);
-		} else if (M_OFFSET == mode) {
+		} else if (MODE_OFFSET == mode) {
 			offset = clamp(offset - green_steps, -ADC_SCALE, 0);
+		} else if (MODE_SIGNAL == mode && green_steps) {
+			while (green_steps > 0) {
+				if (signal_type + 1 >= SIGNAL_MAX)
+					signal_type = 0;
+				else
+					signal_type += 1;
+
+				green_steps--;
+			}
+
+			while (green_steps < 0) {
+				if (signal_type - 1 < 0)
+					signal_type = SIGNAL_MAX - 1;
+				else
+					signal_type--;
+
+				green_steps++;
+			}
+
+			reset_signal();
 		}
 
 		if (blue_steps) {
-			cw_freq = clamp(cw_freq + blue_steps * 130, 130, 55000);
-			ESP_LOGI(tag, "cw: raw_freq=%i", cw_freq);
-
-			ESP_ERROR_CHECK(dac_cw_generator_disable());
-			dac_cw_config_t cw_config = {
-				.en_ch = DAC_GPIO26_CHANNEL,
-				.scale = DAC_CW_SCALE_1,
-				.phase = DAC_CW_PHASE_0,
-				.freq = cw_freq,
-				.offset = 0,
-			};
-			ESP_ERROR_CHECK(dac_cw_generator_config(&cw_config));
-			ESP_ERROR_CHECK(dac_cw_generator_enable());
+			signal_freq = clamp(signal_freq + blue_steps, 0, 200000);
+			reset_signal();
+			ESP_LOGI(tag, "signal: type=%i freq=%i", signal_type, signal_freq);
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
@@ -443,23 +541,12 @@ void app_main(void)
 	adc_cali_line_fitting_config_t cali_config = {
 		.unit_id = ADC_UNIT_1,
 		.atten = ADC_ATTEN_DB_6,
-		.bitwidth = SOC_ADC_DIGI_MAX_BITWIDTH,
+		.bitwidth = ADC_BITWIDTH,
 	};
 	ESP_ERROR_CHECK(adc_cali_create_scheme_line_fitting(&cali_config, &cali));
 
 	ESP_LOGI(tag, "Start cosine wave generator...");
-	dac_output_enable(DAC_GPIO26_CHANNEL);
-
-	dac_cw_config_t cw_config = {
-		.en_ch = DAC_GPIO26_CHANNEL,
-		.scale = DAC_CW_SCALE_1,
-		.phase = DAC_CW_PHASE_0,
-		.freq = cw_freq, /* ~100kHz */
-		.offset = 0,
-	};
-
-	ESP_ERROR_CHECK(dac_cw_generator_config(&cw_config));
-	ESP_ERROR_CHECK(dac_cw_generator_enable());
+	reset_signal();
 
 	ui_semaphore = xSemaphoreCreateBinary();
 	assert (NULL != ui_semaphore);
