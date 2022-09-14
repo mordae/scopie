@@ -205,7 +205,7 @@ static void preflight()
 	set_register(0x08, 0x0808);	// Back and front porch
 	set_register(0x0b, 0x1100);	// NO=1, STD=1, RTN=0 (16 clocks per line)
 	set_register(0x0c, 0x0000);	// RIM=0 (18b), DM=0, RM=0
-	set_register(0x0f, 0x8001);	// FOSC=1000 (285.7KHz), OSC_EN=1
+	set_register(0x0f, 0xe001);	// FOSC=1110 (500KHz), OSC_EN=1
 	set_register(0x15, 0x0020);	// VCIR=010 (2 clocks)
 	set_register(0x20, 0x0000);	// AD_LO=0 (position GRAM AC=0)
 	set_register(0x21, 0x0000);	// AD_HI=0
