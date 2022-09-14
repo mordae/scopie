@@ -17,7 +17,6 @@
 #include "ili9225.h"
 
 #include <driver/gpio.h>
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -40,9 +39,9 @@ uint16_t lcd_palette[16] = {
 	0b0000011111100000, /* green */
 	0b0000000000011111, /* blue */
 
-	0b1111110001010001, /* light red */
-	0b1000111111110001, /* light green */
-	0b1000110001011111, /* light blue */
+	0b1111101001001001, /* light red */
+	0b0100111111101001, /* light green */
+	0b0100101001011111, /* light blue */
 
 	0b1111111111100000, /* yellow */
 	0b0000011111111111, /* cyan */

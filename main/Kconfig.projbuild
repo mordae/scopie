@@ -61,12 +61,12 @@ menu "Scopie"
 
 		config RE3_LEFT_PIN
 			int "Rotary Encoder 3 - Left Pin"
-			default 17
+			default 4
 			range -1 46
 
 		config RE3_RIGHT_PIN
 			int "Rotary Encoder 3 - Right Pin"
-			default 4
+			default 17
 			range -1 46
 
 		config RE4_SW_PIN

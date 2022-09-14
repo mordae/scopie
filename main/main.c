@@ -15,6 +15,7 @@
  */
 
 #include "ili9225.h"
+#include "rotary.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -61,6 +62,7 @@ enum {
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
 
 static int freq_hz = 100000;
+static int cw_freq = 50320;
 
 static adc_continuous_handle_t cadc;
 static adc_cali_handle_t cali;
@@ -99,30 +101,12 @@ static float time_paint = 0;
  * Rotary encoder.
  */
 enum {
-	M_FREQ = 0,
-	M_ZOOM,
+	M_ZOOM = 0,
 	M_OFFSET,
 	M_MAX,
 };
 
-enum {
-	DIR_CW	= 0x10,
-	DIR_CCW	= 0x20,
-};
-
-enum {
-	R_START = 0,
-	R_CCW_BEGIN,
-	R_CW_BEGIN,
-	R_START_M,
-	R_CW_BEGIN_M,
-	R_CCW_BEGIN_M,
-};
-
-static volatile IRAM_ATTR int r_state = R_START;
-static volatile IRAM_ATTR int r_direction = 0;
-static volatile IRAM_ATTR int r_pressed = 0;
-static volatile IRAM_ATTR int r_mode = 0;
+static volatile int mode = M_ZOOM;
 
 
 static void cadc_before_read(void)
@@ -261,16 +245,16 @@ static void ui_loop(void *arg)
 		int ap = PLOT * (average + offset) / zoom;
 
 		if (ap >= 0 && ap < PLOT) {
-			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, BLUE);
-			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, GREEN);
+			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, LRED);
+			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
 
 			char buf[16];
 			sprintf(buf, "%i mV", (int)average);
 
 			if (ap > 16)
-				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap - 16, GREEN, buf);
+				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap - 16, LGREEN, buf);
 			else
-				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap + 16, GREEN, buf);
+				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap + 16, LGREEN, buf);
 		}
 
 		lcd_draw_rect(0, 0, WIDTH - 1, CHROME - 1, DGRAY);
@@ -278,16 +262,14 @@ static void ui_loop(void *arg)
 		char buf[32];
 
 		sprintf(buf, "%i.%i Hz", freq_hz / 100, (freq_hz % 100) / 10);
-		lcd_draw_string(0, 0, BLUE, buf);
+		lcd_draw_string(0, 0, LRED, buf);
 
-		if (r_mode == M_FREQ)
-			strcpy(buf, "freq.");
-		else if (r_mode == M_ZOOM)
+		if (mode == M_ZOOM)
 			strcpy(buf, "zoom");
-		else if (r_mode == M_OFFSET)
+		else if (mode == M_OFFSET)
 			strcpy(buf, "offset");
 
-		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, RED, buf);
+		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, WHITE, buf);
 
 		TickType_t t3 = xTaskGetTickCount();
 
@@ -330,105 +312,84 @@ static int clamp(int x, int min, int max)
 }
 
 
-static void rotary_change(void *arg)
-{
-	r_pressed = !gpio_get_level(CONFIG_RE1_SW_PIN);
-
-	const uint8_t r_table[6][4] = {
-		{R_START_M,           R_CW_BEGIN,     R_CCW_BEGIN,  R_START},
-		{R_START_M | DIR_CCW, R_START,        R_CCW_BEGIN,  R_START},
-		{R_START_M | DIR_CW,  R_CW_BEGIN,     R_START,      R_START},
-		{R_START_M,           R_CCW_BEGIN_M,  R_CW_BEGIN_M, R_START},
-		{R_START_M,           R_START_M,      R_CW_BEGIN_M, R_START},
-		{R_START_M,           R_CCW_BEGIN_M,  R_START_M,    R_START},
-	};
-
-	uint8_t left = !gpio_get_level(CONFIG_RE1_LEFT_PIN);
-	uint8_t right = !gpio_get_level(CONFIG_RE1_RIGHT_PIN);
-
-	uint8_t pin_state = (left << 1) | right;
-	r_state = r_table[r_state & 0xf][pin_state];
-
-	if (r_state & (DIR_CW | DIR_CCW)) {
-		static TickType_t prev = 0;
-		TickType_t now = xTaskGetTickCountFromISR() / portTICK_PERIOD_MS;
-
-		if (now <= prev) {
-			prev = now - 1;
-		}
-		else if (now - prev > 200) {
-			prev = now - 200;
-		}
-
-		int speed = 200 / (now - prev);
-		speed = speed * speed;
-		prev = now;
-
-		if (r_state & DIR_CW) {
-			r_state &= 0xf;
-			r_direction += speed;
-		}
-		else if (r_state & DIR_CCW) {
-			r_state &= 0xf;
-			r_direction -= speed;
-		}
-	}
-}
-
-
 static void input_loop(void *arg)
 {
 	ESP_LOGI(tag, "Register input handlers...");
 	ESP_ERROR_CHECK(gpio_install_isr_service(0));
 
-	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_SW_PIN, rotary_change, NULL));
-	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_LEFT_PIN, rotary_change, NULL));
-	ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_RE1_RIGHT_PIN, rotary_change, NULL));
+	int red = rotary_add(CONFIG_RE1_SW_PIN,
+	                     CONFIG_RE1_LEFT_PIN,
+	                     CONFIG_RE1_RIGHT_PIN,
+	                     200);
 
-	gpio_config_t config = {
-		.pin_bit_mask = BIT64(CONFIG_RE1_SW_PIN)
-		              | BIT64(CONFIG_RE1_LEFT_PIN)
-		              | BIT64(CONFIG_RE1_RIGHT_PIN),
-		.mode = GPIO_MODE_INPUT,
-		.pull_up_en = 1,
-		.intr_type = GPIO_INTR_ANYEDGE,
-	};
-	ESP_ERROR_CHECK(gpio_config(&config));
+	int green = rotary_add(CONFIG_RE2_SW_PIN,
+	                       CONFIG_RE2_LEFT_PIN,
+	                       CONFIG_RE2_RIGHT_PIN,
+	                       100);
+
+	int white = rotary_add(CONFIG_RE3_SW_PIN,
+	                       CONFIG_RE3_LEFT_PIN,
+	                       CONFIG_RE3_RIGHT_PIN,
+	                       1);
+
+	int blue = rotary_add(CONFIG_RE4_SW_PIN,
+	                      CONFIG_RE4_LEFT_PIN,
+	                      CONFIG_RE4_RIGHT_PIN,
+	                      100);
+
+	assert (red >= 0);
+	assert (green >= 0);
+	assert (white >= 0);
+	assert (blue >= 0);
 
 	while (1) {
-		rotary_change(NULL);
+		int red_steps = rotary_read_steps(red);
+		int green_steps = rotary_read_steps(green);
+		int white_steps = rotary_read_steps(white);
+		int blue_steps = rotary_read_steps(blue);
 
-		if (r_pressed) {
-			if (r_direction > 0) {
-				if (r_mode + 1 >= M_MAX)
-					r_mode = 0;
-				else
-					r_mode++;
-			}
+		freq_hz = clamp(freq_hz + red_steps * 10,
+				SOC_ADC_SAMPLE_FREQ_THRES_LOW,
+				SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
 
-			if (r_direction < 0) {
-				if (r_mode - 1 < 0)
-					r_mode = M_MAX - 1;
-				else
-					r_mode--;
-			}
+		while (white_steps > 0) {
+			if (mode + 1 >= M_MAX)
+				mode = 0;
+			else
+				mode += 1;
 
-			r_direction = 0;
+			white_steps--;
 		}
-		else if (r_direction) {
-			if (M_FREQ == r_mode) {
-				freq_hz = clamp(freq_hz + r_direction * 10,
-				                SOC_ADC_SAMPLE_FREQ_THRES_LOW,
-				                SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
-			}
-			else if (M_ZOOM == r_mode) {
-				zoom = clamp(zoom - r_direction * 3, 500, 3300);
-			}
-			else if (M_OFFSET == r_mode) {
-				offset = clamp(offset - r_direction * 10, -3200, 0);
-			}
 
-			r_direction = 0;
+		while (white_steps < 0) {
+			if (mode - 1 < 0)
+				mode = M_MAX - 1;
+			else
+				mode--;
+
+			white_steps++;
+		}
+
+		if (M_ZOOM == mode) {
+			zoom = clamp(zoom - green_steps, 500, 3300);
+		} else if (M_OFFSET == mode) {
+			offset = clamp(offset - green_steps, -3200, 0);
+		}
+
+		if (blue_steps) {
+			cw_freq = clamp(cw_freq + blue_steps * 130, 130, 55000);
+			ESP_LOGI(tag, "cw: raw_freq=%i", cw_freq);
+
+			ESP_ERROR_CHECK(dac_cw_generator_disable());
+			dac_cw_config_t cw_config = {
+				.en_ch = DAC_GPIO26_CHANNEL,
+				.scale = DAC_CW_SCALE_1,
+				.phase = DAC_CW_PHASE_0,
+				.freq = cw_freq,
+				.offset = 0,
+			};
+			ESP_ERROR_CHECK(dac_cw_generator_config(&cw_config));
+			ESP_ERROR_CHECK(dac_cw_generator_enable());
 		}
 
 		vTaskDelay(pdMS_TO_TICKS(10));
@@ -472,7 +433,7 @@ void app_main(void)
 		.en_ch = DAC_GPIO26_CHANNEL,
 		.scale = DAC_CW_SCALE_1,
 		.phase = DAC_CW_PHASE_0,
-		.freq = 50250, /* ~1kHz */
+		.freq = cw_freq, /* ~100kHz */
 		.offset = 0,
 	};
 
