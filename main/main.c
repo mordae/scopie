@@ -83,7 +83,7 @@ static uint16_t *volts;
  * GUI
  */
 static int v_scale = ADC_SCALE;
-static int offset = 0;
+static int v_offset = 0;
 
 static float average = ADC_SCALE / 2;
 static int averages[WIDTH] = {0};
@@ -110,7 +110,7 @@ static float time_paint = 0;
  */
 enum {
 	MODE_SIGNAL = 0,
-	MODE_OFFSET,
+	MODE_V_OFFSET,
 	MODE_V_SCALE,
 	MODE_MAX,
 };
@@ -251,26 +251,28 @@ static void gui_loop(void *arg)
 		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
 
 		for (int i = start; i < start + WIDTH; i++) {
-			int avp = PLOT * ((averages[i - start] >> 8) + offset) / v_scale;
+			int avp = PLOT * ((averages[i - start] >> 8) + v_offset) / v_scale;
 			if (avp >= 0 && avp < PLOT)
 				lcd_draw_pixel(i - start, CHROME + avp, DPURPLE);
 
-			int vp = PLOT * (vs[i] + offset) / v_scale;
+			int vp = PLOT * (vs[i] + v_offset) / v_scale;
 			if (vp >= 0 && vp < PLOT)
 				lcd_draw_pixel(i - start, CHROME + vp, WHITE);
 		}
 
-		int ap = PLOT * (average + offset) / v_scale;
+		int ap = PLOT * (average + v_offset) / v_scale;
 
 		if (ap >= 0 && ap < PLOT) {
 			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, LRED);
-			lcd_draw_rect(99, CHROME + ap - 3, 99, CHROME + ap + 3, LRED);
-			lcd_draw_rect(99, HEIGHT - 1, 99, HEIGHT - 11, LRED);
-			lcd_draw_rect(99, CHROME, 99, CHROME + 10, LRED);
+
+			for (int i = 1; i < 3; i++) {
+				int x = 50 * i - 1;
+				lcd_draw_rect(x, CHROME + ap - 4, x, CHROME + ap + 4, LRED);
+			}
 
 			for (int i = 1; i < 10; i++) {
-				lcd_draw_rect(i * 10 - 1, HEIGHT - 1, i * 10 - 1, HEIGHT - 6, LRED);
-				lcd_draw_rect(i * 10 - 1, CHROME, i * 10 - 1, CHROME + 5, LRED);
+				int x = i * 10 - 1;
+				lcd_draw_rect(x, CHROME + ap - 2, x, CHROME + ap + 2, LRED);
 			}
 
 			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
@@ -298,8 +300,8 @@ static void gui_loop(void *arg)
 
 		if (mode == MODE_V_SCALE)
 			strcpy(buf, "v-scale");
-		else if (mode == MODE_OFFSET)
-			strcpy(buf, "offset");
+		else if (mode == MODE_V_OFFSET)
+			strcpy(buf, "v-offset");
 		else if (mode == MODE_SIGNAL)
 			strcpy(buf, "signal");
 
@@ -428,7 +430,7 @@ static void input_loop(void *arg)
 	int green = rotary_add(CONFIG_RE2_SW_PIN,
 	                       CONFIG_RE2_LEFT_PIN,
 	                       CONFIG_RE2_RIGHT_PIN,
-	                       1);
+	                       10);
 
 	int white = rotary_add(CONFIG_RE3_SW_PIN,
 	                       CONFIG_RE3_LEFT_PIN,
@@ -476,10 +478,12 @@ static void input_loop(void *arg)
 		if (MODE_V_SCALE == mode && green_steps) {
 			v_scale = clamp(v_scale - green_steps * 100, 500, ADC_SCALE);
 			ESP_LOGI(tag, "config: v_scale=%i", v_scale);
-		} else if (MODE_OFFSET == mode && green_steps) {
-			offset = clamp(offset + green_steps * ADC_SCALE / 50, -ADC_SCALE, ADC_SCALE);
-			ESP_LOGI(tag, "config: offset=%i", offset);
-		} else if (MODE_SIGNAL == mode && green_steps) {
+		}
+		else if (MODE_V_OFFSET == mode && green_steps) {
+			v_offset = clamp(v_offset + green_steps * ADC_SCALE / 50, -ADC_SCALE, ADC_SCALE);
+			ESP_LOGI(tag, "config: v_offset=%i", v_offset);
+		}
+		else if (MODE_SIGNAL == mode && green_steps) {
 			while (green_steps > 0) {
 				if (signal_type + 1 >= SIGNAL_MAX)
 					signal_type = 0;
