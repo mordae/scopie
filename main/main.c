@@ -555,13 +555,13 @@ void app_main(void)
 	assert (NULL != paint_semaphore);
 
 	ESP_LOGI(tag, "Start input processing task...");
-	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 1, NULL, 0);
+	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 2, NULL, 0);
 
 	ESP_LOGI(tag, "Start the GUI loop...");
 	xTaskCreatePinnedToCore(gui_loop, "gui", 4096, NULL, 1, NULL, 1);
 
 	ESP_LOGI(tag, "Start the paint loop...");
-	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 1, NULL, 0);
+	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 3, NULL, 0);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
 	volts = volts_array[0];
