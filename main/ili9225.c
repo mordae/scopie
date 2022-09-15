@@ -27,6 +27,18 @@
 static const char *tag = "ili9225";
 
 
+/* Coordinates for a point. */
+struct lcd_point {
+	int x, y;
+};
+
+/* Coordinates for a rectangle. */
+struct lcd_rect {
+	int x0, y0;
+	int x1, y1;
+};
+
+
 enum lcd_orientation lcd_orientation = LCD_ROTATE_90;
 
 uint16_t lcd_palette[16] = {
@@ -358,6 +370,18 @@ void lcd_sync(void)
 }
 
 
+inline static int clamp(int x, int min, int max)
+{
+	if (x < min)
+		return min;
+
+	if (x > max)
+		return max;
+
+	return x;
+}
+
+
 struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y)
 {
 	struct lcd_point phys = {x, y};
@@ -392,10 +416,8 @@ struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y)
 			break;
 	}
 
-	assert (phys.x >= 0);
-	assert (phys.x < LCD_WIDTH);
-	assert (phys.y >= 0);
-	assert (phys.y < LCD_HEIGHT);
+	phys.x = clamp(phys.x, 0, LCD_WIDTH - 1);
+	phys.y = clamp(phys.y, 0, LCD_HEIGHT - 1);
 
 	return phys;
 }

@@ -129,31 +129,6 @@ void lcd_sync(void);
 extern uint8_t (*lcd_input)[LCD_HEIGHT][LCD_WIDTH / 2];
 
 
-/* Coordinates for a point. */
-struct lcd_point {
-	uint8_t x, y;
-};
-
-/* Coordinates for a rectangle. */
-struct lcd_rect {
-	uint8_t x0, y0;
-	uint8_t x1, y1;
-};
-
-
-/*
- * Transfer coordinates from virtual space to the physical space.
- */
-struct lcd_point lcd_point_to_phys(uint8_t x, uint8_t y);
-
-
-/*
- * Transfer coordinates from virtual space to the physical space,
- * but for a whole rectangle.
- */
-struct lcd_rect lcd_rect_to_phys(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1);
-
-
 /*
  * Color a single pixel.
  */
