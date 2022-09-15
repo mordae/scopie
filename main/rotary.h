@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include <freertos/FreeRTOS.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -38,6 +39,10 @@
  * so that we can register per-pin handlers.
  */
 int rotary_add(int sw, int left, int right, uint8_t sens);
+
+
+/* Wait for any of the rotary encoders to change. */
+void rotary_wait(TickType_t ticks);
 
 
 /*

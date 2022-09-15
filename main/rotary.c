@@ -16,10 +16,12 @@
 
 #include "rotary.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+
 #include <driver/gpio.h>
 #include <esp_log.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <stdint.h>
 
 
@@ -62,6 +64,10 @@ static unsigned next = 0;
 static struct encoder encoders[ROTARY_MAX];
 
 
+static StaticSemaphore_t input_semaphore;
+static SemaphoreHandle_t input_signal;
+
+
 static void intr_handler(void *arg);
 
 
@@ -77,10 +83,19 @@ inline static int clamp(int x, int min, int max)
 }
 
 
+void rotary_wait(TickType_t ticks)
+{
+	xSemaphoreTake(input_signal, ticks);
+}
+
+
 int rotary_add(int sw, int left, int right, uint8_t sens)
 {
 	assert ((left >= 0) && (right >= 0));
 	assert (sens > 0);
+
+	if (NULL == input_signal)
+		input_signal = xSemaphoreCreateBinaryStatic(&input_semaphore);
 
 	if (next >= ROTARY_MAX)
 		return -1;
@@ -170,4 +185,7 @@ static void intr_handler(void *arg)
 			en->steps -= speed;
 		}
 	}
+
+	static BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(input_signal, &xHigherPriorityTaskWoken);
 }

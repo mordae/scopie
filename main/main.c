@@ -88,8 +88,8 @@ static int v_offset = 0;
 static float average = ADC_SCALE / 2;
 static int averages[WIDTH] = {0};
 
-static SemaphoreHandle_t ui_semaphore = NULL;
-static SemaphoreHandle_t paint_semaphore = NULL;
+static SemaphoreHandle_t ui_signal = NULL;
+static SemaphoreHandle_t paint_signal = NULL;
 
 static TickType_t show_signal_freq_until = 0;
 
@@ -199,7 +199,7 @@ static void oscilloscope_loop(void *arg)
 		TickType_t t1 = xTaskGetTickCount();
 		time_adc = (time_adc * 15 + t1 - t0) / 16;
 
-		xSemaphoreGive(ui_semaphore);
+		xSemaphoreGive(ui_signal);
 	}
 }
 
@@ -210,7 +210,7 @@ static void gui_loop(void *arg)
 
 	while (1) {
 		TickType_t t0 = xTaskGetTickCount();
-		xSemaphoreTake(ui_semaphore, portMAX_DELAY);
+		xSemaphoreTake(ui_signal, portMAX_DELAY);
 
 		TickType_t t1 = xTaskGetTickCount();
 
@@ -313,7 +313,7 @@ static void gui_loop(void *arg)
 		time_math = (time_math * 15 + t2 - t1) / 16;
 		time_plot = (time_plot * 15 + t3 - t2) / 16;
 
-		xSemaphoreGive(paint_semaphore);
+		xSemaphoreGive(paint_signal);
 		vTaskDelay(pdMS_TO_TICKS(1));
 	}
 }
@@ -323,7 +323,7 @@ static void paint_loop(void *arg)
 {
 	while (1) {
 		TickType_t t0 = xTaskGetTickCount();
-		xSemaphoreTake(paint_semaphore, portMAX_DELAY);
+		xSemaphoreTake(paint_signal, portMAX_DELAY);
 
 		TickType_t t1 = xTaskGetTickCount();
 		lcd_sync();
@@ -430,7 +430,7 @@ static void input_loop(void *arg)
 	int green = rotary_add(CONFIG_RE2_SW_PIN,
 	                       CONFIG_RE2_LEFT_PIN,
 	                       CONFIG_RE2_RIGHT_PIN,
-	                       10);
+	                       1);
 
 	int white = rotary_add(CONFIG_RE3_SW_PIN,
 	                       CONFIG_RE3_LEFT_PIN,
@@ -448,6 +448,8 @@ static void input_loop(void *arg)
 	assert (blue >= 0);
 
 	while (1) {
+		rotary_wait(portMAX_DELAY);
+
 		int red_steps = rotary_read_steps(red);
 		int green_steps = rotary_read_steps(green);
 		int white_steps = rotary_read_steps(white);
@@ -480,7 +482,7 @@ static void input_loop(void *arg)
 			ESP_LOGI(tag, "config: v_scale=%i", v_scale);
 		}
 		else if (MODE_V_OFFSET == mode && green_steps) {
-			v_offset = clamp(v_offset + green_steps * ADC_SCALE / 50, -ADC_SCALE, ADC_SCALE);
+			v_offset = clamp(v_offset + green_steps * 50, -ADC_SCALE, ADC_SCALE);
 			ESP_LOGI(tag, "config: v_offset=%i", v_offset);
 		}
 		else if (MODE_SIGNAL == mode && green_steps) {
@@ -510,8 +512,6 @@ static void input_loop(void *arg)
 			reset_signal();
 			ESP_LOGI(tag, "signal: type=%i freq=%i", signal_type, signal_freq);
 		}
-
-		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }
 
@@ -564,20 +564,20 @@ void app_main(void)
 	ESP_LOGI(tag, "Start cosine wave generator...");
 	reset_signal();
 
-	ui_semaphore = xSemaphoreCreateBinary();
-	assert (NULL != ui_semaphore);
+	ui_signal = xSemaphoreCreateBinary();
+	assert (NULL != ui_signal);
 
-	paint_semaphore = xSemaphoreCreateBinary();
-	assert (NULL != paint_semaphore);
+	paint_signal = xSemaphoreCreateBinary();
+	assert (NULL != paint_signal);
 
 	ESP_LOGI(tag, "Start input processing task...");
-	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 2, NULL, 0);
+	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 3, NULL, 0);
 
 	ESP_LOGI(tag, "Start the GUI loop...");
 	xTaskCreatePinnedToCore(gui_loop, "gui", 4096, NULL, 1, NULL, 1);
 
 	ESP_LOGI(tag, "Start the paint loop...");
-	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 3, NULL, 0);
+	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 2, NULL, 0);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
 	volts = volts_array[0];
