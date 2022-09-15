@@ -61,13 +61,13 @@ enum {
 /*
  * ADC
  */
-#define ADC_BITWIDTH 10
+#define ADC_BITWIDTH SOC_ADC_DIGI_MAX_BITWIDTH
 #define ADC_FRAME 1000
 #define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
-#define ADC_SCALE 3500
+#define ADC_SCALE 3400
 #define ADC_MULT 2
 
-static int freq_hz = 10000;
+static int freq_hz = 250000;
 static int signal_freq = 1000;
 
 static adc_continuous_handle_t cadc;
@@ -82,7 +82,7 @@ static uint16_t *volts;
 /*
  * GUI
  */
-static int zoom = ADC_SCALE;
+static int v_scale = ADC_SCALE;
 static int offset = 0;
 
 static float average = ADC_SCALE / 2;
@@ -111,7 +111,7 @@ static float time_paint = 0;
 enum {
 	MODE_SIGNAL = 0,
 	MODE_OFFSET,
-	MODE_ZOOM,
+	MODE_V_SCALE,
 	MODE_MAX,
 };
 
@@ -145,7 +145,7 @@ static void cadc_before_read(void)
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
 
 	adc_continuous_config_t dig_cfg = {
-		.sample_freq_hz = freq_hz * ADC_BITWIDTH,
+		.sample_freq_hz = freq_hz,
 		.conv_mode = ADC_CONV_SINGLE_UNIT_1,
 		.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
 	};
@@ -251,19 +251,29 @@ static void gui_loop(void *arg)
 		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
 
 		for (int i = start; i < start + WIDTH; i++) {
-			int avp = PLOT * ((averages[i - start] >> 8) + offset) / zoom;
+			int avp = PLOT * ((averages[i - start] >> 8) + offset) / v_scale;
 			if (avp >= 0 && avp < PLOT)
 				lcd_draw_pixel(i - start, CHROME + avp, DPURPLE);
 
-			int vp = PLOT * (vs[i] + offset) / zoom;
+			int vp = PLOT * (vs[i] + offset) / v_scale;
 			if (vp >= 0 && vp < PLOT)
 				lcd_draw_pixel(i - start, CHROME + vp, WHITE);
 		}
 
-		int ap = PLOT * (average + offset) / zoom;
+		int ap = PLOT * (average + offset) / v_scale;
 
 		if (ap >= 0 && ap < PLOT) {
-			lcd_draw_rect(0, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
+			lcd_draw_rect(0, CHROME + ap, 99, CHROME + ap, LRED);
+			lcd_draw_rect(99, CHROME + ap - 3, 99, CHROME + ap + 3, LRED);
+			lcd_draw_rect(99, HEIGHT - 1, 99, HEIGHT - 11, LRED);
+			lcd_draw_rect(99, CHROME, 99, CHROME + 10, LRED);
+
+			for (int i = 1; i < 10; i++) {
+				lcd_draw_rect(i * 10 - 1, HEIGHT - 1, i * 10 - 1, HEIGHT - 6, LRED);
+				lcd_draw_rect(i * 10 - 1, CHROME, i * 10 - 1, CHROME + 5, LRED);
+			}
+
+			lcd_draw_rect(100, CHROME + ap, WIDTH - 1, CHROME + ap, LGREEN);
 
 			char buf[16];
 			sprintf(buf, "%i mV", (int)average);
@@ -271,7 +281,7 @@ static void gui_loop(void *arg)
 			if (ap > 16)
 				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap - 16, LGREEN, buf);
 			else
-				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap + 16, LGREEN, buf);
+				lcd_draw_string(WIDTH - strlen(buf) * 8 - 1, CHROME + ap + 2, LGREEN, buf);
 		}
 
 		lcd_draw_rect(0, 0, WIDTH - 1, CHROME - 1, DGRAY);
@@ -282,12 +292,12 @@ static void gui_loop(void *arg)
 			sprintf(buf, "%i.%.3i kHz", signal_freq / 1000, signal_freq % 1000);
 			lcd_draw_string(0, 0, LBLUE, buf);
 		} else {
-			sprintf(buf, "%i.%.3i kHz", freq_hz / 1000, freq_hz % 1000);
+			sprintf(buf, "%i.%.3i kHz", (2 * freq_hz / 5 / 100) / 1000, (2 * freq_hz / 5 / 100) % 1000);
 			lcd_draw_string(0, 0, LRED, buf);
 		}
 
-		if (mode == MODE_ZOOM)
-			strcpy(buf, "zoom");
+		if (mode == MODE_V_SCALE)
+			strcpy(buf, "v-scale");
 		else if (mode == MODE_OFFSET)
 			strcpy(buf, "offset");
 		else if (mode == MODE_SIGNAL)
@@ -418,7 +428,7 @@ static void input_loop(void *arg)
 	int green = rotary_add(CONFIG_RE2_SW_PIN,
 	                       CONFIG_RE2_LEFT_PIN,
 	                       CONFIG_RE2_RIGHT_PIN,
-	                       100);
+	                       1);
 
 	int white = rotary_add(CONFIG_RE3_SW_PIN,
 	                       CONFIG_RE3_LEFT_PIN,
@@ -441,9 +451,9 @@ static void input_loop(void *arg)
 		int white_steps = rotary_read_steps(white);
 		int blue_steps = rotary_read_steps(blue);
 
-		freq_hz = clamp(freq_hz + red_steps,
-				SOC_ADC_SAMPLE_FREQ_THRES_LOW / ADC_BITWIDTH,
-				SOC_ADC_SAMPLE_FREQ_THRES_HIGH / ADC_BITWIDTH);
+		freq_hz = clamp(freq_hz + red_steps * 250,
+				SOC_ADC_SAMPLE_FREQ_THRES_LOW,
+				SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
 
 		while (white_steps > 0) {
 			if (mode + 1 >= MODE_MAX)
@@ -463,10 +473,12 @@ static void input_loop(void *arg)
 			white_steps++;
 		}
 
-		if (MODE_ZOOM == mode) {
-			zoom = clamp(zoom - green_steps, 500, ADC_SCALE);
-		} else if (MODE_OFFSET == mode) {
-			offset = clamp(offset - green_steps, -ADC_SCALE, 0);
+		if (MODE_V_SCALE == mode && green_steps) {
+			v_scale = clamp(v_scale - green_steps * 100, 500, ADC_SCALE);
+			ESP_LOGI(tag, "config: v_scale=%i", v_scale);
+		} else if (MODE_OFFSET == mode && green_steps) {
+			offset = clamp(offset + green_steps * ADC_SCALE / 50, -ADC_SCALE, ADC_SCALE);
+			ESP_LOGI(tag, "config: offset=%i", offset);
 		} else if (MODE_SIGNAL == mode && green_steps) {
 			while (green_steps > 0) {
 				if (signal_type + 1 >= SIGNAL_MAX)
