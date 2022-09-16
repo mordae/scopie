@@ -3,6 +3,7 @@ idf_component_register(
 		"main.c"
 		"ili9225.c"
 		"rotary.c"
+		"scope.c"
 
 	INCLUDE_DIRS
 		"."

@@ -16,22 +16,21 @@
 
 #include "ili9225.h"
 #include "rotary.h"
+#include "scope.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
-#include "driver/dac_common.h"
-#include "driver/ledc.h"
-#include "soc/dac_channel.h"
+#include <driver/dac_common.h>
+#include <driver/ledc.h>
+#include <soc/dac_channel.h>
+#include <esp_adc/adc_continuous.h>
 
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
-#include "esp_adc/adc_continuous.h"
-#include "esp_freertos_hooks.h"
-#include "esp_heap_caps.h"
-#include "esp_log.h"
-#include "esp_spiffs.h"
-#include "esp_vfs.h"
+#include <esp_freertos_hooks.h>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
+#include <esp_spiffs.h>
+#include <esp_vfs.h>
 
 #include <string.h>
 #include <math.h>
@@ -59,34 +58,40 @@ enum {
 
 
 /*
- * ADC
+ * Oscilloscopee
  */
-#define ADC_BITWIDTH SOC_ADC_DIGI_MAX_BITWIDTH
-#define ADC_FRAME 1000
-#define ADC_BUFFER (ADC_FRAME * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
-#define ADC_SCALE 3400
-#define ADC_MULT 2
+struct scope_config scope = {
+	.freq_hz = 250000,
+	.atten = ADC_ATTEN_DB_6,
+	.channel = CONFIG_ADC_CH,
+	.unit = ADC_UNIT_1,
+	.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
+	.multiplier = 2,
 
-static int freq_hz = 250000;
+	.trigger = SCOPE_TRIGGER_RISING,
+	.trigger_zone = 10,
+	.trigger_arg = 0,
+
+	.window_length = 220,
+};
+
+
+/*
+ * Signal generators
+ */
 static int signal_freq = 1000;
-
-static adc_continuous_handle_t cadc;
-static adc_cali_handle_t cali;
-
-static uint8_t frame[ADC_BUFFER];
-
-static uint16_t volts_array[3][ADC_FRAME];
-static uint16_t *volts;
 
 
 /*
  * GUI
  */
-static int v_scale = ADC_SCALE;
+#define MAX_MV 3400
+static int v_scale = MAX_MV;
 static int v_offset = 0;
+static bool hold = false;
+static bool held = false;
 
-static float average = ADC_SCALE / 2;
-static int averages[WIDTH] = {0};
+static float average = MAX_MV / 2;
 
 static SemaphoreHandle_t ui_signal = NULL;
 static SemaphoreHandle_t paint_signal = NULL;
@@ -97,10 +102,8 @@ static TickType_t show_signal_freq_until = 0;
 /*
  * Timing measurements
  */
-static float time_to_math = 0;
-static float time_math = 0;
+static float time_to_plot = 0;
 static float time_plot = 0;
-static float time_adc = 0;
 static float time_to_paint = 0;
 static float time_paint = 0;
 
@@ -112,6 +115,8 @@ enum {
 	MODE_SIGNAL = 0,
 	MODE_V_OFFSET,
 	MODE_V_SCALE,
+	MODE_HOLD,
+	MODE_TRIGGER,
 	MODE_MAX,
 };
 
@@ -124,140 +129,30 @@ enum {
 };
 
 static volatile int signal_type = 0;
-
-
-static void cadc_before_read(void)
-{
-	static int prev_hz = 0;
-
-	if (prev_hz == freq_hz)
-		return;
-
-	if (prev_hz) {
-		ESP_ERROR_CHECK(adc_continuous_stop(cadc));
-		ESP_ERROR_CHECK(adc_continuous_deinit(cadc));
-	}
-
-	adc_continuous_handle_cfg_t adc_config = {
-		.max_store_buf_size = ADC_BUFFER,
-		.conv_frame_size = ADC_BUFFER,
-	};
-	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
-
-	adc_continuous_config_t dig_cfg = {
-		.sample_freq_hz = freq_hz,
-		.conv_mode = ADC_CONV_SINGLE_UNIT_1,
-		.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
-	};
-
-	adc_digi_pattern_config_t adc_pattern[SOC_ADC_PATT_LEN_MAX] = {0};
-	dig_cfg.pattern_num = 1;
-	dig_cfg.adc_pattern = adc_pattern;
-
-	adc_pattern[0].unit = ADC_UNIT_1;
-	adc_pattern[0].channel = CONFIG_ADC_CH;
-	adc_pattern[0].bit_width = ADC_BITWIDTH;
-	adc_pattern[0].atten = ADC_ATTEN_DB_6;
-
-	ESP_ERROR_CHECK(adc_continuous_config(cadc, &dig_cfg));
-	ESP_ERROR_CHECK(adc_continuous_start(cadc));
-
-	prev_hz = freq_hz;
-}
-
-
-static void oscilloscope_loop(void *arg)
-{
-	while (1) {
-		cadc_before_read();
-
-		uint32_t size = 0;
-
-		TickType_t t0 = xTaskGetTickCount();
-
-		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame, ADC_BUFFER, &size, 1000));
-
-		if (size < ADC_BUFFER) {
-			ESP_LOGE(tag, "ADC did not return a full frame, just %lu bytes.", size);
-			continue;
-		}
-
-		uint16_t *voltsptr = volts;
-		int total = 0;
-
-		for (int i = 0; i < ADC_BUFFER; i += SOC_ADC_DIGI_DATA_BYTES_PER_CONV) {
-			adc_digi_output_data_t *p = (void *)(frame + i);
-			int vs = 0;
-			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &vs));
-			vs *= ADC_MULT;
-			*voltsptr++ = vs;
-			total += vs;
-		}
-
-		average = ((average * 31) + ((float)total / ADC_FRAME)) / 32;
-
-		TickType_t t1 = xTaskGetTickCount();
-		time_adc = (time_adc * 15 + t1 - t0) / 16;
-
-		xSemaphoreGive(ui_signal);
-	}
-}
-
+uint16_t *vs = NULL;
 
 static void gui_loop(void *arg)
 {
-	unsigned bufno = 0;
-
 	while (1) {
 		TickType_t t0 = xTaskGetTickCount();
-		xSemaphoreTake(ui_signal, portMAX_DELAY);
 
-		TickType_t t1 = xTaskGetTickCount();
+		if (!held) {
+			free(vs);
+			vs = scope_read(&average, pdMS_TO_TICKS(33));
 
-		/* Use the next buffer, please. */
-		bufno = (bufno + 1) % 3;
-		volts = volts_array[bufno];
-
-		/* -2th is the current one. */
-		uint16_t *vs = volts_array[(bufno - 2) % 3];
-
-		uint32_t total = 0;
-
-		for (uint32_t i = 0; i < ADC_FRAME; i++)
-			total += vs[i];
-
-		int start = 0;
-		int deviation = INT_MAX;
-
-		for (int i = 0; i < ADC_FRAME - WIDTH; i++) {
-			float dev = 0;
-
-			for (int j = 0; j < WIDTH; j++) {
-				int d = abs((averages[j] >> 8) - vs[i + j]);
-				dev += d * d;
-			}
-
-			if (dev < deviation) {
-				deviation = dev;
-				start = i;
-			}
+			if (hold)
+				held = true;
 		}
 
-		for (int i = 0; i < WIDTH; i++)
-			averages[i] = ((averages[i] << 3) - averages[i] + (vs[start + i] << 8)) >> 3;
-
-		TickType_t t2 = xTaskGetTickCount();
-
+		TickType_t t1 = xTaskGetTickCount();
 		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
 
-		for (int i = start; i < start + WIDTH; i++) {
-			int avp = PLOT * ((averages[i - start] >> 8) + v_offset) / v_scale;
-			if (avp >= 0 && avp < PLOT)
-				lcd_draw_pixel(i - start, CHROME + avp, DPURPLE);
-
-			int vp = PLOT * (vs[i] + v_offset) / v_scale;
-			if (vp >= 0 && vp < PLOT)
-				lcd_draw_pixel(i - start, CHROME + vp, WHITE);
+		if (vs) {
+			for (int i = 0; i < WIDTH; i++) {
+				int vp = PLOT * (vs[i] + v_offset) / v_scale;
+				if (vp >= 0 && vp < PLOT)
+					lcd_draw_pixel(i, CHROME + vp, WHITE);
+			}
 		}
 
 		int ap = PLOT * (average + v_offset) / v_scale;
@@ -294,7 +189,8 @@ static void gui_loop(void *arg)
 			sprintf(buf, "%i.%.3i kHz", signal_freq / 1000, signal_freq % 1000);
 			lcd_draw_string(0, 0, LBLUE, buf);
 		} else {
-			sprintf(buf, "%i.%.3i kHz", (2 * freq_hz / 5 / 100) / 1000, (2 * freq_hz / 5 / 100) % 1000);
+			int freq_hz = 2 * scope.freq_hz / 5 / 100;
+			sprintf(buf, "%i.%.3i kHz", freq_hz / 1000, freq_hz % 1000);
 			lcd_draw_string(0, 0, LRED, buf);
 		}
 
@@ -304,17 +200,39 @@ static void gui_loop(void *arg)
 			strcpy(buf, "v-offset");
 		else if (mode == MODE_SIGNAL)
 			strcpy(buf, "signal");
+		else if (mode == MODE_HOLD)
+			strcpy(buf, "hold");
+		else if (mode == MODE_TRIGGER)
+			strcpy(buf, "trigger");
 
 		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, WHITE, buf);
 
-		TickType_t t3 = xTaskGetTickCount();
+		char status[8] = "";
 
-		time_to_math = (time_to_math * 15 + t1 - t0) / 16;
-		time_math = (time_math * 15 + t2 - t1) / 16;
-		time_plot = (time_plot * 15 + t3 - t2) / 16;
+		if (hold) {
+			/* Draw the pause symbol. */
+			strcat(status, "\x1c");
+		}
+
+		/* Draw trigger method glyph. */
+		if (SCOPE_TRIGGER_RISING == scope.trigger) {
+			strcat(status, " \x1e");
+		} else if (SCOPE_TRIGGER_FALLING == scope.trigger) {
+			strcat(status, " \x1f");
+		}
+
+		/* Draw the status icons. */
+		lcd_draw_string(WIDTH - strlen(status) * 8 - 1, HEIGHT - 17, LRED, status);
+
+		TickType_t t2 = xTaskGetTickCount();
+		time_to_plot = (time_to_plot * 15 + t1 - t0) / 16;
+		time_plot = (time_plot * 15 + t2 - t1) / 16;
 
 		xSemaphoreGive(paint_signal);
-		vTaskDelay(pdMS_TO_TICKS(1));
+
+		/* We want ~25 fps. */
+		if (t2 - t0 < pdMS_TO_TICKS(40))
+			vTaskDelay(pdMS_TO_TICKS(40) - (t2 - t0));
 	}
 }
 
@@ -455,56 +373,72 @@ static void input_loop(void *arg)
 		int white_steps = rotary_read_steps(white);
 		int blue_steps = rotary_read_steps(blue);
 
-		freq_hz = clamp(freq_hz + red_steps * 250,
-				SOC_ADC_SAMPLE_FREQ_THRES_LOW,
-				SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
+		if (red_steps) {
+			scope.freq_hz = clamp(scope.freq_hz + red_steps * 250,
+					      SOC_ADC_SAMPLE_FREQ_THRES_LOW,
+					      SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
+			scope_config(&scope);
+			held = false;
+		}
 
 		while (white_steps > 0) {
-			if (mode + 1 >= MODE_MAX)
-				mode = 0;
-			else
-				mode += 1;
-
+			mode = (mode + 1 >= MODE_MAX) ? 0 : mode + 1;
 			white_steps--;
 		}
 
 		while (white_steps < 0) {
-			if (mode - 1 < 0)
-				mode = MODE_MAX - 1;
-			else
-				mode--;
-
+			mode = (mode - 1) < 0 ? MODE_MAX - 1 : mode - 1;
 			white_steps++;
 		}
 
 		if (MODE_V_SCALE == mode && green_steps) {
-			v_scale = clamp(v_scale - green_steps * 100, 500, ADC_SCALE);
+			v_scale = clamp(v_scale - green_steps * 100, 500, MAX_MV);
 			ESP_LOGI(tag, "config: v_scale=%i", v_scale);
 		}
 		else if (MODE_V_OFFSET == mode && green_steps) {
-			v_offset = clamp(v_offset + green_steps * 50, -ADC_SCALE, ADC_SCALE);
+			v_offset = clamp(v_offset + green_steps * 50, -MAX_MV, MAX_MV);
 			ESP_LOGI(tag, "config: v_offset=%i", v_offset);
 		}
 		else if (MODE_SIGNAL == mode && green_steps) {
 			while (green_steps > 0) {
-				if (signal_type + 1 >= SIGNAL_MAX)
-					signal_type = 0;
-				else
-					signal_type += 1;
-
+				signal_type = signal_type + 1 >= SIGNAL_MAX ? 0 : signal_type + 1;
 				green_steps--;
 			}
 
 			while (green_steps < 0) {
-				if (signal_type - 1 < 0)
-					signal_type = SIGNAL_MAX - 1;
-				else
-					signal_type--;
-
+				signal_type = signal_type - 1 < 0 ? SIGNAL_MAX - 1 : signal_type - 1;
 				green_steps++;
 			}
 
 			reset_signal();
+			held = false;
+		}
+		else if (MODE_HOLD == mode && green_steps) {
+			while (green_steps > 0) {
+				hold = !hold;
+				green_steps--;
+			}
+
+			while (green_steps < 0) {
+				hold = !hold;
+				green_steps++;
+			}
+
+			held = false;
+		}
+		else if (MODE_TRIGGER == mode && green_steps) {
+			while (green_steps > 0) {
+				scope.trigger = scope.trigger + 1 >= SCOPE_TRIGGER_MAX ? 0 : scope.trigger + 1;
+				green_steps--;
+			}
+
+			while (green_steps < 0) {
+				scope.trigger = scope.trigger - 1 < 0 ? SCOPE_TRIGGER_MAX - 1 : scope.trigger - 1;
+				green_steps++;
+			}
+
+			scope_config(&scope);
+			held = false;
 		}
 
 		if (blue_steps) {
@@ -553,14 +487,6 @@ void app_main(void)
 	lcd_init(CONFIG_LCD_RS_PIN, CONFIG_LCD_RST_PIN);
 	lcd_load_font("/spiffs/HaxorMedium-13.bin");
 
-	ESP_LOGI(tag, "Prepare ADC calibration...");
-	adc_cali_line_fitting_config_t cali_config = {
-		.unit_id = ADC_UNIT_1,
-		.atten = ADC_ATTEN_DB_6,
-		.bitwidth = ADC_BITWIDTH,
-	};
-	ESP_ERROR_CHECK(adc_cali_create_scheme_line_fitting(&cali_config, &cali));
-
 	ESP_LOGI(tag, "Start cosine wave generator...");
 	reset_signal();
 
@@ -570,25 +496,25 @@ void app_main(void)
 	paint_signal = xSemaphoreCreateBinary();
 	assert (NULL != paint_signal);
 
+	ESP_LOGI(tag, "Start the oscilloscope...");
+	scope_init(1, 0);
+	scope_config(&scope);
+
 	ESP_LOGI(tag, "Start input processing task...");
-	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 3, NULL, 0);
+	xTaskCreatePinnedToCore(input_loop, "input", 4096, NULL, 4, NULL, 0);
 
 	ESP_LOGI(tag, "Start the GUI loop...");
-	xTaskCreatePinnedToCore(gui_loop, "gui", 4096, NULL, 1, NULL, 1);
+	xTaskCreatePinnedToCore(gui_loop, "gui", 4096, NULL, 2, NULL, 1);
 
 	ESP_LOGI(tag, "Start the paint loop...");
-	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 2, NULL, 0);
-
-	ESP_LOGI(tag, "Start the oscilloscope...");
-	volts = volts_array[0];
-	xTaskCreatePinnedToCore(oscilloscope_loop, "oscilloscope", 4096, NULL, 1, NULL, 0);
+	xTaskCreatePinnedToCore(paint_loop, "paint", 4096, NULL, 3, NULL, 0);
 
 	ESP_ERROR_CHECK(esp_register_freertos_idle_hook_for_cpu(add_idle_cpu0, 0));
 	ESP_ERROR_CHECK(esp_register_freertos_idle_hook_for_cpu(add_idle_cpu1, 1));
 
 	while (1) {
-		ESP_LOGI(tag, "timing: adc=%-2.1f to_math=%-2.1f math=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
-			 time_adc, time_to_math, time_math, time_plot, time_to_paint, time_paint);
+		ESP_LOGI(tag, "timing: adc=%-2.1f math=%-2.1f to_plot=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
+			 scope_adc_ticks, scope_math_ticks, time_to_plot, time_plot, time_to_paint, time_paint);
 
 		multi_heap_info_t heap;
 		heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);
