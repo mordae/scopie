@@ -84,6 +84,12 @@ extern float scope_adc_ticks;
  */
 extern float scope_math_ticks;
 
+/*
+ * Number of times a conversion frame was dropped due to an
+ * internal buffer overflow.
+ */
+extern unsigned scope_dropped_frames;
+
 
 /*
  * Start the background data acquisition task.

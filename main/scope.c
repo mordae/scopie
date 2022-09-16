@@ -83,18 +83,18 @@ float scope_adc_ticks = 0;
 /* How long have we spent doing the trigger math. */
 float scope_math_ticks = 0;
 
+/* Number of times a frame was dropped. */
+unsigned scope_dropped_frames = 0;
+
 
 /* Return oversampling rate to use for a given frequency. */
 static unsigned oversampling_for_freq_hz(unsigned freq_hz)
 {
-	if (freq_hz <= 62500)
-		return 4;
+	if (freq_hz <= 10e3)
+		return 20;
 
-	if (freq_hz <= 125 * 1000)
-		return 4;
-
-	if (freq_hz <= 250 * 1000)
-		return 4;
+	if (freq_hz <= 100e3)
+		return 2;
 
 	return 1;
 }
@@ -175,47 +175,58 @@ static void scope_loop(void *arg)
 		TickType_t t1 = xTaskGetTickCount();
 		scope_adc_ticks = (scope_adc_ticks * 15 + t1 - t0) / 16;
 
-		/* We need to average oversampled values. */
+		/* Figure out how many actual samples are in the frame. */
 		unsigned oversample = oversampling_for_freq_hz(config.freq_hz);
+		unsigned samples = FRAME_LEN / oversample;
 
-		/* Shift the buffers down. */
-		memmove(sample_buffer + TRIGGER_LEN - trigger_avail - FRAME_LEN / oversample,
+		/* Shift the buffers left. */
+		memmove(sample_buffer + TRIGGER_LEN - trigger_avail - samples,
 		        sample_buffer + TRIGGER_LEN - trigger_avail,
-			2 * FRAME_LEN / oversample);
+			sizeof(uint16_t) * samples);
 
-		memmove(trigger_buffer + TRIGGER_LEN - trigger_avail - FRAME_LEN / oversample,
+		memmove(trigger_buffer + TRIGGER_LEN - trigger_avail - samples,
 		        trigger_buffer + TRIGGER_LEN - trigger_avail,
-			2 * FRAME_LEN / oversample);
+			sizeof(uint16_t) * samples);
 
-		/* Copy in the new voltages. */
-		uint16_t *sptr = sample_buffer + TRIGGER_LEN - FRAME_LEN / oversample;
-		uint16_t *tptr = trigger_buffer + TRIGGER_LEN - FRAME_LEN / oversample;
+		/* Offset into the buffers where the new samples start. */
+		uint16_t *sptr = sample_buffer + TRIGGER_LEN - samples;
+		uint16_t *tptr = trigger_buffer + TRIGGER_LEN - samples;
 		unsigned total = 0;
 
-		memset(sptr, 0, 2 * FRAME_LEN / oversample);
+		/* Clear the new samples, we are going to add to them. */
+		memset(sptr, 0, sizeof(uint16_t) * samples);
 
+		/* Add in the new voltages. */
 		for (int i = 0; i < FRAME_LEN; i++) {
 			int voltage;
 			int offset = i * SOC_ADC_DIGI_DATA_BYTES_PER_CONV;
 			adc_digi_output_data_t *p = (void *)(frame_buffer + offset);
 			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &voltage));
+
+			/*
+			 * Add multiple input samples to the same output slot,
+			 * we are going to divide them later.
+			 */
 			sptr[i / oversample] += voltage;
 			total += voltage;
 		}
 
-		for (int i = 0; i < FRAME_LEN / oversample; i++) {
-			sptr[i] = sptr[i] * config.multiplier / oversample;
+		/* Fixup the newly written samples and start filtering them
+		 * for the trigger procedure. */
+		for (int i = 0; i < samples; i++) {
+			sptr[i] = config.multiplier * sptr[i] / oversample;
 			tptr[i] = (fast_average + sptr[i]) >> 1;
 			fast_average = (fast_average + tptr[i]) >> 1;
 		}
 
-		for (int i = FRAME_LEN / oversample; i >= 0; i--) {
+		/* Finish filtering in the reverse direction. */
+		for (int i = samples - 1; i >= 0; i--) {
 			tptr[i] = (fast_average + tptr[i]) >> 1;
 			fast_average = (fast_average + tptr[i]) >> 1;
 		}
 
 		/* We have more samples now. */
-		trigger_avail += FRAME_LEN / oversample;
+		trigger_avail += samples;
 
 		/* Update the average voltage. */
 		float voltage = config.multiplier * (float)total / FRAME_LEN;
@@ -239,8 +250,9 @@ static void scope_loop(void *arg)
 					free(window);
 
 				/* Then create a new one and ring the bell. */
-				window = malloc(2 * config.window_size);
-				memcpy(window, sstart + match, 2 * config.window_size);
+				window = malloc(sizeof(uint16_t) * config.window_size);
+				memcpy(window, sstart + match,
+				       sizeof(uint16_t) * config.window_size);
 				xSemaphoreGive(window_signal);
 
 				/* Finally, subtract the used up samples. */
@@ -276,6 +288,15 @@ void scope_init(int pri, int core)
 }
 
 
+static bool on_pool_ovf(adc_continuous_handle_t handle,
+                        const adc_continuous_evt_data_t *data,
+                        void *arg)
+{
+	scope_dropped_frames++;
+	return false;
+}
+
+
 static void reconfigure_adc(struct scope_config *cfg)
 {
 	if (config.freq_hz) {
@@ -288,6 +309,12 @@ static void reconfigure_adc(struct scope_config *cfg)
 		.conv_frame_size = FRAME_BUFFER_LEN,
 	};
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
+
+	adc_continuous_evt_cbs_t cbs = {
+		.on_conv_done = NULL,
+		.on_pool_ovf = on_pool_ovf,
+	};
+	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(cadc, &cbs, NULL));
 
 	int oversample = oversampling_for_freq_hz(cfg->freq_hz);
 	adc_continuous_config_t dig_cfg = {

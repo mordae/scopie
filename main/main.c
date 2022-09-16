@@ -504,7 +504,7 @@ void app_main(void)
 	assert (NULL != paint_signal);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
-	scope_init(1, 0);
+	scope_init(3, 0);
 	scope_config(&scope);
 
 	ESP_LOGI(tag, "Start input processing task...");
@@ -529,6 +529,8 @@ void app_main(void)
 		ESP_LOGI(tag, "memory: free=%zu used=%zu watermark=%zu largest=%zu",
 		         heap.total_free_bytes, heap.total_allocated_bytes,
 			 heap.minimum_free_bytes, heap.largest_free_block);
+
+		ESP_LOGI(tag, " scope: dropped_frames=%u", scope_dropped_frames);
 
 		ESP_LOGI(tag, "  idle: cpu0=%u cpu1=%u", idle_cpu0 / 2, idle_cpu1 / 2);
 		idle_cpu0 = idle_cpu1 = 0;
