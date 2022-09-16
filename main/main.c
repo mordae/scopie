@@ -67,7 +67,7 @@ struct scope_config scope = {
 	.unit = ADC_UNIT_1,
 	.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
 	.multiplier = 2,
-	.window_size = 220,
+	.window_size = 880,
 
 	/* And let user change these: */
 	.freq_hz = 250000,
@@ -87,6 +87,7 @@ static int signal_freq = 1000;
 #define MAX_MV 3400
 static int v_scale = MAX_MV;
 static int v_offset = 0;
+static int h_offset = 0;
 static bool hold = false;
 static bool held = false;
 
@@ -113,6 +114,7 @@ static float time_paint = 0;
 enum {
 	MODE_SIGNAL = 0,
 	MODE_V_OFFSET,
+	MODE_H_OFFSET,
 	MODE_V_SCALE,
 	MODE_HOLD,
 	MODE_TRIGGER,
@@ -148,7 +150,7 @@ static void gui_loop(void *arg)
 
 		if (vs) {
 			for (int i = 0; i < WIDTH; i++) {
-				int vp = PLOT * (vs[i] + v_offset) / v_scale;
+				int vp = PLOT * (vs[h_offset + i] + v_offset) / v_scale;
 				if (vp >= 0 && vp < PLOT)
 					lcd_draw_pixel(i, CHROME + vp, WHITE);
 			}
@@ -197,6 +199,8 @@ static void gui_loop(void *arg)
 			strcpy(buf, "v-scale");
 		else if (mode == MODE_V_OFFSET)
 			strcpy(buf, "v-offset");
+		else if (mode == MODE_H_OFFSET)
+			strcpy(buf, "h-offset");
 		else if (mode == MODE_SIGNAL)
 			strcpy(buf, "signal");
 		else if (mode == MODE_HOLD)
@@ -397,6 +401,10 @@ static void input_loop(void *arg)
 		else if (MODE_V_OFFSET == mode && green_steps) {
 			v_offset = clamp(v_offset + green_steps * 50, -MAX_MV, MAX_MV);
 			ESP_LOGI(tag, "config: v_offset=%i", v_offset);
+		}
+		else if (MODE_H_OFFSET == mode && green_steps) {
+			h_offset = clamp(h_offset + green_steps * 10, 0, scope.window_size - WIDTH);
+			ESP_LOGI(tag, "config: h_offset=%i", h_offset);
 		}
 		else if (MODE_SIGNAL == mode && green_steps) {
 			while (green_steps > 0) {
