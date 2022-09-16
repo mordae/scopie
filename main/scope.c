@@ -45,6 +45,8 @@ static adc_cali_handle_t cali;
 
 /* To send configuration changes through. */
 QueueHandle_t config_queue;
+static StaticSemaphore_t config_semaphore;
+static SemaphoreHandle_t config_counter;
 
 /* To wait for a new window from scope_read(). */
 static StaticSemaphore_t window_semaphore;
@@ -259,6 +261,7 @@ static void scope_loop(void *arg)
 void scope_init(int pri, int core)
 {
 	window_signal = xSemaphoreCreateBinaryStatic(&window_semaphore);
+	config_counter = xSemaphoreCreateCountingStatic(1000, 0, &config_semaphore);
 	config_queue = xQueueCreate(3, sizeof(struct scope_config));
 
 	BaseType_t res;
@@ -358,8 +361,12 @@ static bool apply_config(void)
 				free(window);
 		}
 
+		/* Let the task know. */
 		memcpy(&config, &new, sizeof(config));
 		applied = true;
+
+		/* Notify scope_config(). */
+		xSemaphoreGive(config_counter);
 	}
 
 	return applied;
@@ -371,7 +378,11 @@ void scope_config(struct scope_config *cfg)
 	assert (cfg->trigger >= 0 && cfg->trigger < SCOPE_TRIGGER_MAX);
 	assert (cfg->window_size >= 64 && cfg->window_size <= MAX_WINDOW_SIZE);
 
+	/* Send new configuration. */
 	xQueueSend(config_queue, cfg, portMAX_DELAY);
+
+	/* Wait for it to get processed. */
+	xSemaphoreTake(config_counter, portMAX_DELAY);
 }
 
 
