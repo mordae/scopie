@@ -86,10 +86,26 @@ float scope_math_ticks = 0;
 /* Number of times a frame was dropped. */
 unsigned scope_dropped_frames = 0;
 
+/* Counter for read frames. We can only read 10 before system
+ * restarts the ADC on us. We must compensate to ensure no
+ * discontinuities in the buffers. */
+unsigned frames_read = 0;
+
+/* Static working buffers. */
+static uint8_t frame_buffer[FRAME_BUFFER_LEN];
+static uint16_t trigger_buffer[TRIGGER_LEN];
+static uint16_t sample_buffer[TRIGGER_LEN];
+
+/* How many samples are available in the trigger/sample buffers. */
+static unsigned trigger_avail = 0;
+
 
 /* Return oversampling rate to use for a given frequency. */
 static unsigned oversampling_for_freq_hz(unsigned freq_hz)
 {
+	if (freq_hz < 5e3)
+		return 40;
+
 	if (freq_hz <= 10e3)
 		return 20;
 
@@ -141,16 +157,11 @@ static bool apply_config(void);
 /* Background task collecting the data. */
 static void scope_loop(void *arg)
 {
-	/* Static working buffers. */
-	static uint8_t frame_buffer[FRAME_BUFFER_LEN];
-	static uint16_t trigger_buffer[TRIGGER_LEN];
-	static uint16_t sample_buffer[TRIGGER_LEN];
-
-	/* How many samples are available in the trigger/sample buffers. */
-	unsigned trigger_avail = 0;
-
 	/* Fast changing average for low-pass filtering samples to the trigger buffer. */
 	unsigned fast_average = 0;
+
+	/* To be able to detect dropped frames. */
+	unsigned last_dropped = 0;
 
 	memset(frame_buffer, 0, sizeof(frame_buffer));
 	memset(sample_buffer, 0, sizeof(sample_buffer));
@@ -167,6 +178,15 @@ static void scope_loop(void *arg)
 
 		/* Update configuration. */
 		apply_config();
+
+		if ((frames_read++ >= 10) || (last_dropped != scope_dropped_frames)) {
+			ESP_ERROR_CHECK(adc_continuous_stop(cadc));
+			ESP_ERROR_CHECK(adc_continuous_start(cadc));
+			last_dropped = scope_dropped_frames;
+			trigger_avail = 0;
+			frames_read = 0;
+			continue;
+		}
 
 		TickType_t t0 = xTaskGetTickCount();
 		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame_buffer, FRAME_BUFFER_LEN, &size, 1000));
@@ -299,22 +319,22 @@ static bool on_pool_ovf(adc_continuous_handle_t handle,
 
 static void reconfigure_adc(struct scope_config *cfg)
 {
-	if (config.freq_hz) {
+	if (config.freq_hz)
 		ESP_ERROR_CHECK(adc_continuous_stop(cadc));
-		ESP_ERROR_CHECK(adc_continuous_deinit(cadc));
+
+	if (!cadc) {
+		adc_continuous_handle_cfg_t adc_config = {
+			.max_store_buf_size = 8 * FRAME_BUFFER_LEN,
+			.conv_frame_size = FRAME_BUFFER_LEN,
+		};
+		ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
+
+		adc_continuous_evt_cbs_t cbs = {
+			.on_conv_done = NULL,
+			.on_pool_ovf = on_pool_ovf,
+		};
+		ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(cadc, &cbs, NULL));
 	}
-
-	adc_continuous_handle_cfg_t adc_config = {
-		.max_store_buf_size = 8 * FRAME_BUFFER_LEN,
-		.conv_frame_size = FRAME_BUFFER_LEN,
-	};
-	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &cadc));
-
-	adc_continuous_evt_cbs_t cbs = {
-		.on_conv_done = NULL,
-		.on_pool_ovf = on_pool_ovf,
-	};
-	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(cadc, &cbs, NULL));
 
 	int oversample = oversampling_for_freq_hz(cfg->freq_hz);
 	adc_continuous_config_t dig_cfg = {
@@ -336,6 +356,9 @@ static void reconfigure_adc(struct scope_config *cfg)
 
 	ESP_ERROR_CHECK(adc_continuous_config(cadc, &dig_cfg));
 	ESP_ERROR_CHECK(adc_continuous_start(cadc));
+
+	trigger_avail = 0;
+	frames_read = 0;
 }
 
 
@@ -383,7 +406,7 @@ static bool apply_config(void)
 
 		if (config.window_size != new.window_size) {
 			/* Make sure to consume any pending window so that the task
-			 * won't write outside its bounds. */
+			 * won't read outside their bounds. */
 			if (pdTRUE == xSemaphoreTake(window_signal, 0))
 				free(window);
 		}
