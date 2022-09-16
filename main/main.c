@@ -67,10 +67,10 @@ struct scope_config scope = {
 	.unit = ADC_UNIT_1,
 	.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
 	.multiplier = 2,
-	.window_size = 880,
 
 	/* And let user change these: */
 	.freq_hz = 250000,
+	.window_size = 880,
 	.trigger = SCOPE_TRIGGER_RISING,
 };
 
@@ -233,9 +233,9 @@ static void gui_loop(void *arg)
 
 		xSemaphoreGive(paint_signal);
 
-		/* We want ~25 fps. */
-		if (t2 - t0 < pdMS_TO_TICKS(40))
-			vTaskDelay(pdMS_TO_TICKS(40) - (t2 - t0));
+		/* We want ~30 fps. */
+		if (t2 - t0 < pdMS_TO_TICKS(33))
+			vTaskDelay(pdMS_TO_TICKS(33) - (t2 - t0));
 	}
 }
 
@@ -380,6 +380,10 @@ static void input_loop(void *arg)
 			scope.freq_hz = clamp(scope.freq_hz + red_steps * 250,
 					      SOC_ADC_SAMPLE_FREQ_THRES_LOW,
 					      SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
+
+			scope.window_size = scope.freq_hz < 100000 ? 440 : 880;
+			h_offset = clamp(h_offset, 0, scope.window_size - WIDTH);
+
 			scope_config(&scope);
 			held = false;
 		}
@@ -520,8 +524,8 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_register_freertos_idle_hook_for_cpu(add_idle_cpu1, 1));
 
 	while (1) {
-		ESP_LOGI(tag, "timing: adc=%-2.1f math=%-2.1f to_plot=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
-			 scope_adc_ticks, scope_math_ticks, time_to_plot, time_plot, time_to_paint, time_paint);
+		ESP_LOGI(tag, "timing: adc=%-2.1f math=%-2.1f send=%-2.1f to_plot=%-2.1f plot=%-2.1f to_paint=%-2.1f paint=%-2.1f",
+			 scope_adc_ticks, scope_math_ticks, scope_send_ticks, time_to_plot, time_plot, time_to_paint, time_paint);
 
 		multi_heap_info_t heap;
 		heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);

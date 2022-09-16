@@ -72,8 +72,8 @@ struct scope_config {
 
 /*
  * How long have been spent on waiting for ADC on average.
- * It is rather important for this to be slightly above 0,
- * so please monitor it.
+ * It is rather important for this (or scope_send_ticks) to
+ * be slightly above 0,
  */
 extern float scope_adc_ticks;
 
@@ -85,8 +85,14 @@ extern float scope_adc_ticks;
 extern float scope_math_ticks;
 
 /*
+ * How long have we spent waiting on client to pick up the window.
+ */
+extern float scope_send_ticks;
+
+/*
  * Number of times a conversion frame was dropped due to an
- * internal buffer overflow.
+ * internal buffer overflow. This happens when the client is
+ * not picking the windows fast enough. Causes ADC restarts.
  */
 extern unsigned scope_dropped_frames;
 

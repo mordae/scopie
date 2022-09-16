@@ -45,12 +45,14 @@ static adc_cali_handle_t cali;
 
 /* To send configuration changes through. */
 QueueHandle_t config_queue;
-static StaticSemaphore_t config_semaphore;
 static SemaphoreHandle_t config_counter;
 
 /* To wait for a new window from scope_read(). */
-static StaticSemaphore_t window_semaphore;
-static SemaphoreHandle_t window_signal;
+static QueueHandle_t window_queue;
+
+/* To notify window sender that the configuration has changed and
+ * it should cease enqueing new windows and reconfigure immediately. */
+static SemaphoreHandle_t window_interrupt;
 
 
 /* Maximum window size. */
@@ -67,13 +69,6 @@ static SemaphoreHandle_t window_signal;
 #define TRIGGER_ZONE 64
 
 
-/*
- * Window to use after successfully taking the window_signal.
- * It not taken, scope_loop will free it before providing another one.
- * If taken, reader must free() it afterwards.
- */
-static uint16_t *window;
-
 /* Long-term average voltage. */
 static float average_voltage = 1000;
 
@@ -82,6 +77,9 @@ float scope_adc_ticks = 0;
 
 /* How long have we spent doing the trigger math. */
 float scope_math_ticks = 0;
+
+/* How long have we spent waiting on client to pick up the window. */
+float scope_send_ticks = 0;
 
 /* Number of times a frame was dropped. */
 unsigned scope_dropped_frames = 0;
@@ -103,11 +101,8 @@ static unsigned trigger_avail = 0;
 /* Return oversampling rate to use for a given frequency. */
 static unsigned oversampling_for_freq_hz(unsigned freq_hz)
 {
-	if (freq_hz < 5e3)
-		return 40;
-
-	if (freq_hz <= 10e3)
-		return 20;
+	if (freq_hz <= 40e3)
+		return 5;
 
 	if (freq_hz <= 100e3)
 		return 2;
@@ -260,20 +255,30 @@ static void scope_loop(void *arg)
 		unsigned need_samples = TRIGGER_ZONE + config.window_size;
 
 		while (trigger_avail >= need_samples) {
+			/* Make ourselves interruptible. */
+			if (xSemaphoreTake(window_interrupt, 0))
+				break;
+
 			uint16_t *tstart = trigger_buffer + TRIGGER_LEN - trigger_avail;
 			uint16_t *sstart = sample_buffer + TRIGGER_LEN - trigger_avail;
 			int match = trigger(tstart);
 
 			if (match >= 0) {
-				/* We have a window! Make sure to free any unused one. */
-				if (pdTRUE == xSemaphoreTake(window_signal, 0))
-					free(window);
-
-				/* Then create a new one and ring the bell. */
-				window = malloc(sizeof(uint16_t) * config.window_size);
+				/* Create a new window and send it to the client. */
+				uint16_t *window = malloc(sizeof(uint16_t) * config.window_size);
 				memcpy(window, sstart + match,
 				       sizeof(uint16_t) * config.window_size);
-				xSemaphoreGive(window_signal);
+
+				TickType_t t0 = xTaskGetTickCount();
+				while (!xQueueSend(window_queue, &window, pdMS_TO_TICKS(10))) {
+					if (xSemaphoreTake(window_interrupt, 0)) {
+						xSemaphoreGive(window_interrupt);
+						free(window);
+						break;
+					}
+				}
+				TickType_t t1 = xTaskGetTickCount();
+				scope_send_ticks = (scope_send_ticks * 15 + t1 - t0) / 16;
 
 				/* Finally, subtract the used up samples. */
 				trigger_avail -= match + config.window_size;
@@ -292,9 +297,10 @@ static void scope_loop(void *arg)
 
 void scope_init(int pri, int core)
 {
-	window_signal = xSemaphoreCreateBinaryStatic(&window_semaphore);
-	config_counter = xSemaphoreCreateCountingStatic(1000, 0, &config_semaphore);
-	config_queue = xQueueCreate(3, sizeof(struct scope_config));
+	config_counter = xSemaphoreCreateCounting(1000, 0);
+	config_queue = xQueueCreate(1, sizeof(struct scope_config));
+	window_queue = xQueueCreate(1, sizeof(uint16_t *));
+	window_interrupt = xSemaphoreCreateBinary();
 
 	BaseType_t res;
 
@@ -381,6 +387,8 @@ static bool apply_config(void)
 	struct scope_config new = {0};
 	bool applied = false;
 
+	xSemaphoreTake(window_interrupt, 0);
+
 	while (xQueueReceive(config_queue, &new, 0)) {
 		if ((config.freq_hz != new.freq_hz) ||
 		    (config.atten != new.atten) ||
@@ -404,13 +412,6 @@ static bool apply_config(void)
 			/* Will be picked up by the task automatically. */
 		}
 
-		if (config.window_size != new.window_size) {
-			/* Make sure to consume any pending window so that the task
-			 * won't read outside their bounds. */
-			if (pdTRUE == xSemaphoreTake(window_signal, 0))
-				free(window);
-		}
-
 		/* Let the task know. */
 		memcpy(&config, &new, sizeof(config));
 		applied = true;
@@ -428,8 +429,13 @@ void scope_config(struct scope_config *cfg)
 	assert (cfg->trigger >= 0 && cfg->trigger < SCOPE_TRIGGER_MAX);
 	assert (cfg->window_size >= 64 && cfg->window_size <= MAX_WINDOW_SIZE);
 
+	/* Take any previously sent configuration to save time. */
+	struct scope_config null;
+	xQueueReceive(config_queue, &null, 0);
+
 	/* Send new configuration. */
 	xQueueSend(config_queue, cfg, portMAX_DELAY);
+	xSemaphoreGive(window_interrupt);
 
 	/* Wait for it to get processed. */
 	xSemaphoreTake(config_counter, portMAX_DELAY);
@@ -438,14 +444,14 @@ void scope_config(struct scope_config *cfg)
 
 uint16_t *scope_read(float *average, TickType_t wait)
 {
-	/* Wait for a window. */
-	if (!xSemaphoreTake(window_signal, wait))
-		return NULL;
+	/* Get a new window. */
+	uint16_t *window;
+	xQueueReceive(window_queue, &window, portMAX_DELAY);
 
 	/* Report the long-term average voltage. */
 	if (average)
 		*average = average_voltage;
 
-	/* Return it, it's ours. */
+	/* Return it, it's up to the caller to free it. */
 	return window;
 }
