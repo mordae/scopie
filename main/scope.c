@@ -52,7 +52,7 @@ static SemaphoreHandle_t window_signal;
 
 
 /* Maximum window size. */
-#define MAX_WINDOW_LEN 2048
+#define MAX_WINDOW_SIZE 2048
 
 /* How many samples to read at once. */
 #define FRAME_LEN 1000
@@ -60,6 +60,9 @@ static SemaphoreHandle_t window_signal;
 
 /* Size of the trigger buffer. */
 #define TRIGGER_LEN 8192
+
+/* Size of the trigger zone. */
+#define TRIGGER_ZONE 64
 
 
 /*
@@ -98,9 +101,6 @@ static unsigned oversampling_for_freq_hz(unsigned freq_hz)
 /* Try to find a rising or falling edge. */
 static int trigger_edge(uint16_t *samples)
 {
-	if (config.trigger_zone < 2)
-		return 0;
-
 	if (samples[0] <= average_voltage && samples[1] > average_voltage)
 		return 1;
 
@@ -119,12 +119,12 @@ static int trigger(uint16_t *samples)
 		return 0;
 	}
 	else if (SCOPE_TRIGGER_RISING == config.trigger) {
-		for (int i = 0; i < config.trigger_zone; i++)
+		for (int i = 0; i < TRIGGER_ZONE; i++)
 			if (trigger_edge(samples + i) > 0)
 				return i;
 	}
 	else if (SCOPE_TRIGGER_FALLING == config.trigger) {
-		for (int i = 0; i < config.trigger_zone; i++)
+		for (int i = 0; i < TRIGGER_ZONE; i++)
 			if (trigger_edge(samples + i) < 0)
 				return i;
 	}
@@ -220,11 +220,11 @@ static void scope_loop(void *arg)
 		average_voltage = ((average_voltage * 255) + voltage) / 256;
 
 		/*
-		 * We need at least trigger_zone + window_length samples to run the trigger
-		 * procedure. If the trigger succeeds somewhere in the trigger_zone, we are
-		 * going to be returning window_length samples that follow.
+		 * We need at least TRIGGER_ZONE + window_size samples to run the trigger
+		 * procedure. If the trigger succeeds somewhere in the TRIGGER_ZONE, we are
+		 * going to be returning window_size samples that follow.
 		 */
-		unsigned need_samples = config.window_length + config.trigger_zone;
+		unsigned need_samples = TRIGGER_ZONE + config.window_size;
 
 		while (trigger_avail >= need_samples) {
 			uint16_t *tstart = trigger_buffer + TRIGGER_LEN - trigger_avail;
@@ -237,16 +237,16 @@ static void scope_loop(void *arg)
 					free(window);
 
 				/* Then create a new one and ring the bell. */
-				window = malloc(2 * config.window_length);
-				memcpy(window, sstart + match, 2 * config.window_length);
+				window = malloc(2 * config.window_size);
+				memcpy(window, sstart + match, 2 * config.window_size);
 				xSemaphoreGive(window_signal);
 
 				/* Finally, subtract the used up samples. */
-				trigger_avail -= match + config.window_length;
+				trigger_avail -= match + config.window_size;
 			}
 			else {
 				/* No window found. Discard the samples. */
-				trigger_avail -= config.trigger_zone;
+				trigger_avail -= TRIGGER_ZONE;
 			}
 		}
 
@@ -342,18 +342,16 @@ static bool apply_config(void)
 		}
 
 		if ((config.trigger != new.trigger) ||
-		    (config.trigger_zone != new.trigger_zone) ||
-		    (config.window_length != new.window_length) ||
+		    (config.window_size != new.window_size) ||
 		    (config.multiplier != new.multiplier))
 		{
-			ESP_LOGI(tag, "capture: trigger=%u(%u), window=%u mul=%u",
-				 new.trigger, new.trigger_zone, new.window_length,
-				 new.multiplier);
+			ESP_LOGI(tag, "capture: trigger=%u, window=%u mul=%u",
+				 new.trigger, new.window_size, new.multiplier);
 
 			/* Will be picked up by the task automatically. */
 		}
 
-		if (config.window_length != new.window_length) {
+		if (config.window_size != new.window_size) {
 			/* Make sure to consume any pending window so that the task
 			 * won't write outside its bounds. */
 			if (pdTRUE == xSemaphoreTake(window_signal, 0))
@@ -371,11 +369,7 @@ static bool apply_config(void)
 void scope_config(struct scope_config *cfg)
 {
 	assert (cfg->trigger >= 0 && cfg->trigger < SCOPE_TRIGGER_MAX);
-	assert (cfg->window_length > 0 && cfg->window_length <= MAX_WINDOW_LEN);
-	assert (cfg->window_length >= cfg->trigger_zone);
-
-	if (cfg->trigger)
-		assert (cfg->trigger_zone <= 100);
+	assert (cfg->window_size >= 64 && cfg->window_size <= MAX_WINDOW_SIZE);
 
 	xQueueSend(config_queue, cfg, portMAX_DELAY);
 }

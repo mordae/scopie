@@ -61,18 +61,17 @@ enum {
  * Oscilloscopee
  */
 struct scope_config scope = {
-	.freq_hz = 250000,
+	/* We keep these static: */
 	.atten = ADC_ATTEN_DB_6,
 	.channel = CONFIG_ADC_CH,
 	.unit = ADC_UNIT_1,
 	.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
 	.multiplier = 2,
+	.window_size = 220,
 
+	/* And let user change these: */
+	.freq_hz = 250000,
 	.trigger = SCOPE_TRIGGER_RISING,
-	.trigger_zone = 10,
-	.trigger_arg = 0,
-
-	.window_length = 220,
 };
 
 

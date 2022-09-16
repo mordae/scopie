@@ -61,20 +61,8 @@ struct scope_config {
 	/* Way to stabilize the image. See scope_trigger above. */
 	int trigger;
 
-	/* Trigger argument, see above. */
-	int trigger_arg;
-
-	/*
-	 * How many samples should the trigger work with. See above.
-	 * At most 100. Heavily impacts performance and you should set it
-	 * in correspondence to the features you want to detect. Using
-	 * e.g. SCOPE_TRIGGER_RISING(20) will best detect rising edges
-	 * 20 samples long.
-	 */
-	unsigned trigger_zone;
-
-	/* Number of samples to return. At most 1000. */
-	unsigned window_length;
+	/* Number of samples to return between 64 and 2048. */
+	unsigned window_size;
 
 	/* Voltage multiplier to compensate for an external voltage
 	 * divider or something. */
