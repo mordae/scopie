@@ -108,7 +108,7 @@ int rotary_add(int sw, int left, int right, uint8_t sens)
 	encoders[next].right = right;
 	encoders[next].steps = 0;
 	encoders[next].sens = sens;
-	encoders[next].state = R_START;
+	encoders[next].state = R_START_M;
 	encoders[next].pressed = false;
 
 	gpio_config_t config = {
