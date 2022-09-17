@@ -24,6 +24,7 @@
 #include <esp_adc/adc_cali_scheme.h>
 #include <esp_adc/adc_continuous.h>
 #include <esp_log.h>
+#include <hal/adc_ll.h>
 
 #include <string.h>
 #include <math.h>
@@ -56,17 +57,17 @@ static SemaphoreHandle_t window_interrupt;
 
 
 /* Maximum window size. */
-#define MAX_WINDOW_SIZE 2048
+#define MAX_WINDOW_SIZE 510
 
 /* How many samples to read at once. */
-#define FRAME_LEN 1000
+#define FRAME_LEN 1020
 #define FRAME_BUFFER_LEN (FRAME_LEN * SOC_ADC_DIGI_DATA_BYTES_PER_CONV)
 
 /* Size of the trigger buffer. */
-#define TRIGGER_LEN 8192
+#define TRIGGER_LEN 1020
 
 /* Size of the trigger zone. */
-#define TRIGGER_ZONE 64
+#define TRIGGER_ZONE 510
 
 
 /* Long-term average voltage. */
@@ -84,31 +85,10 @@ float scope_send_ticks = 0;
 /* Number of times a frame was dropped. */
 unsigned scope_dropped_frames = 0;
 
-/* Counter for read frames. We can only read 10 before system
- * restarts the ADC on us. We must compensate to ensure no
- * discontinuities in the buffers. */
-unsigned frames_read = 0;
-
 /* Static working buffers. */
 static uint8_t frame_buffer[FRAME_BUFFER_LEN];
 static uint16_t trigger_buffer[TRIGGER_LEN];
 static uint16_t sample_buffer[TRIGGER_LEN];
-
-/* How many samples are available in the trigger/sample buffers. */
-static unsigned trigger_avail = 0;
-
-
-/* Return oversampling rate to use for a given frequency. */
-static unsigned oversampling_for_freq_hz(unsigned freq_hz)
-{
-	if (freq_hz <= 40e3)
-		return 5;
-
-	if (freq_hz <= 100e3)
-		return 2;
-
-	return 1;
-}
 
 
 /* Try to find a rising or falling edge. */
@@ -132,12 +112,12 @@ static int trigger(uint16_t *samples)
 		return 0;
 	}
 	else if (SCOPE_TRIGGER_RISING == config.trigger) {
-		for (int i = 0; i < TRIGGER_ZONE; i++)
+		for (int i = 10; i < TRIGGER_ZONE; i++)
 			if (trigger_edge(samples + i) > 0)
 				return i;
 	}
 	else if (SCOPE_TRIGGER_FALLING == config.trigger) {
-		for (int i = 0; i < TRIGGER_ZONE; i++)
+		for (int i = 10; i < TRIGGER_ZONE; i++)
 			if (trigger_edge(samples + i) < 0)
 				return i;
 	}
@@ -155,9 +135,6 @@ static void scope_loop(void *arg)
 	/* Fast changing average for low-pass filtering samples to the trigger buffer. */
 	unsigned fast_average = 0;
 
-	/* To be able to detect dropped frames. */
-	unsigned last_dropped = 0;
-
 	memset(frame_buffer, 0, sizeof(frame_buffer));
 	memset(sample_buffer, 0, sizeof(sample_buffer));
 	memset(trigger_buffer, 0, sizeof(trigger_buffer));
@@ -169,128 +146,79 @@ static void scope_loop(void *arg)
 	}
 
 	while (1) {
-		uint32_t size;
+		TickType_t t0 = xTaskGetTickCount();
 
 		/* Update configuration. */
 		apply_config();
 
-		if ((frames_read++ >= 10) || (last_dropped != scope_dropped_frames)) {
-			ESP_ERROR_CHECK(adc_continuous_stop(cadc));
-			ESP_ERROR_CHECK(adc_continuous_start(cadc));
-			last_dropped = scope_dropped_frames;
-			trigger_avail = 0;
-			frames_read = 0;
-			continue;
-		}
-
-		TickType_t t0 = xTaskGetTickCount();
+		uint32_t size;
+		ESP_ERROR_CHECK(adc_continuous_start(cadc));
 		ESP_ERROR_CHECK(adc_continuous_read(cadc, frame_buffer, FRAME_BUFFER_LEN, &size, 1000));
+		ESP_ERROR_CHECK(adc_continuous_stop(cadc));
 		assert (FRAME_BUFFER_LEN == size);
 
 		TickType_t t1 = xTaskGetTickCount();
 		scope_adc_ticks = (scope_adc_ticks * 15 + t1 - t0) / 16;
 
-		/* Figure out how many actual samples are in the frame. */
-		unsigned oversample = oversampling_for_freq_hz(config.freq_hz);
-		unsigned samples = FRAME_LEN / oversample;
-
-		/* Shift the buffers left. */
-		memmove(sample_buffer + TRIGGER_LEN - trigger_avail - samples,
-		        sample_buffer + TRIGGER_LEN - trigger_avail,
-			sizeof(uint16_t) * samples);
-
-		memmove(trigger_buffer + TRIGGER_LEN - trigger_avail - samples,
-		        trigger_buffer + TRIGGER_LEN - trigger_avail,
-			sizeof(uint16_t) * samples);
-
-		/* Offset into the buffers where the new samples start. */
-		uint16_t *sptr = sample_buffer + TRIGGER_LEN - samples;
-		uint16_t *tptr = trigger_buffer + TRIGGER_LEN - samples;
+		/* For the average voltage. */
 		unsigned total = 0;
 
 		/* Clear the new samples, we are going to add to them. */
-		memset(sptr, 0, sizeof(uint16_t) * samples);
+		memset(sample_buffer, 0, sizeof(uint16_t) * TRIGGER_LEN);
 
 		/* Add in the new voltages. */
 		for (int i = 0; i < FRAME_LEN; i++) {
-			int voltage;
 			int offset = i * SOC_ADC_DIGI_DATA_BYTES_PER_CONV;
 			adc_digi_output_data_t *p = (void *)(frame_buffer + offset);
-			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &voltage));
 
-			/*
-			 * Add multiple input samples to the same output slot,
-			 * we are going to divide them later.
-			 */
-			sptr[i / oversample] += voltage;
+			int voltage;
+			ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali, p->type1.data, &voltage));
+			voltage *= config.multiplier;
+			sample_buffer[i] += voltage;
 			total += voltage;
 		}
 
-		/* Fixup the newly written samples and start filtering them
-		 * for the trigger procedure. */
-		for (int i = 0; i < samples; i++) {
-			sptr[i] = config.multiplier * sptr[i] / oversample;
-			tptr[i] = (fast_average + sptr[i]) >> 1;
-			fast_average = (fast_average + tptr[i]) >> 1;
+		/* Start filtering samples for the trigger procedure. */
+		for (int i = 0; i < TRIGGER_LEN; i++) {
+			trigger_buffer[i] = (fast_average + sample_buffer[i]) >> 1;
+			fast_average = (fast_average * 3 + trigger_buffer[i]) >> 2;
 		}
 
 		/* Finish filtering in the reverse direction. */
-		for (int i = samples - 1; i >= 0; i--) {
-			tptr[i] = (fast_average + tptr[i]) >> 1;
-			fast_average = (fast_average + tptr[i]) >> 1;
+		for (int i = TRIGGER_LEN - 1; i >= 0; i--) {
+			trigger_buffer[i] = (fast_average + trigger_buffer[i]) >> 1;
+			fast_average = (fast_average * 3 + trigger_buffer[i]) >> 2;
 		}
-
-		/* We have more samples now. */
-		trigger_avail += samples;
 
 		/* Update the average voltage. */
-		float voltage = config.multiplier * (float)total / FRAME_LEN;
+		float voltage = (float)total / FRAME_LEN;
 		average_voltage = ((average_voltage * 255) + voltage) / 256;
-
-		/*
-		 * We need at least TRIGGER_ZONE + window_size samples to run the trigger
-		 * procedure. If the trigger succeeds somewhere in the TRIGGER_ZONE, we are
-		 * going to be returning window_size samples that follow.
-		 */
-		unsigned need_samples = TRIGGER_ZONE + config.window_size;
-
-		while (trigger_avail >= need_samples) {
-			/* Make ourselves interruptible. */
-			if (xSemaphoreTake(window_interrupt, 0))
-				break;
-
-			uint16_t *tstart = trigger_buffer + TRIGGER_LEN - trigger_avail;
-			uint16_t *sstart = sample_buffer + TRIGGER_LEN - trigger_avail;
-			int match = trigger(tstart);
-
-			if (match >= 0) {
-				/* Create a new window and send it to the client. */
-				uint16_t *window = malloc(sizeof(uint16_t) * config.window_size);
-				memcpy(window, sstart + match,
-				       sizeof(uint16_t) * config.window_size);
-
-				TickType_t t0 = xTaskGetTickCount();
-				while (!xQueueSend(window_queue, &window, pdMS_TO_TICKS(10))) {
-					if (xSemaphoreTake(window_interrupt, 0)) {
-						xSemaphoreGive(window_interrupt);
-						free(window);
-						break;
-					}
-				}
-				TickType_t t1 = xTaskGetTickCount();
-				scope_send_ticks = (scope_send_ticks * 15 + t1 - t0) / 16;
-
-				/* Finally, subtract the used up samples. */
-				trigger_avail -= match + config.window_size;
-			}
-			else {
-				/* No window found. Discard the samples. */
-				trigger_avail -= TRIGGER_ZONE;
-			}
-		}
 
 		TickType_t t2 = xTaskGetTickCount();
 		scope_math_ticks = (scope_math_ticks * 15 + t2 - t1) / 16;
+
+		/* Make ourselves interruptible. */
+		if (xSemaphoreTake(window_interrupt, 0))
+			continue;
+
+		int match = trigger(trigger_buffer);
+		if (match >= 0) {
+			/* Create a new window and send it to the client. */
+			uint16_t *window = malloc(sizeof(uint16_t) * config.window_size);
+			memcpy(window, sample_buffer + match,
+			       sizeof(uint16_t) * config.window_size);
+
+			TickType_t t0 = xTaskGetTickCount();
+			while (!xQueueSend(window_queue, &window, pdMS_TO_TICKS(5))) {
+				if (xSemaphoreTake(window_interrupt, 0)) {
+					xSemaphoreGive(window_interrupt);
+					free(window);
+					break;
+				}
+			}
+			TickType_t t1 = xTaskGetTickCount();
+			scope_send_ticks = (scope_send_ticks * 15 + t1 - t0) / 16;
+		}
 	}
 }
 
@@ -325,9 +253,6 @@ static bool on_pool_ovf(adc_continuous_handle_t handle,
 
 static void reconfigure_adc(struct scope_config *cfg)
 {
-	if (config.freq_hz)
-		ESP_ERROR_CHECK(adc_continuous_stop(cadc));
-
 	if (!cadc) {
 		adc_continuous_handle_cfg_t adc_config = {
 			.max_store_buf_size = 8 * FRAME_BUFFER_LEN,
@@ -342,9 +267,8 @@ static void reconfigure_adc(struct scope_config *cfg)
 		ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(cadc, &cbs, NULL));
 	}
 
-	int oversample = oversampling_for_freq_hz(cfg->freq_hz);
 	adc_continuous_config_t dig_cfg = {
-		.sample_freq_hz = cfg->freq_hz * oversample,
+		.sample_freq_hz = cfg->freq_hz,
 		.conv_mode = ADC_UNIT_1 == cfg->unit
 		           ? ADC_CONV_SINGLE_UNIT_1
 		           : ADC_CONV_SINGLE_UNIT_2,
@@ -361,10 +285,6 @@ static void reconfigure_adc(struct scope_config *cfg)
 	adc_pattern[0].atten = cfg->atten;
 
 	ESP_ERROR_CHECK(adc_continuous_config(cadc, &dig_cfg));
-	ESP_ERROR_CHECK(adc_continuous_start(cadc));
-
-	trigger_avail = 0;
-	frames_read = 0;
 }
 
 
@@ -427,7 +347,7 @@ static bool apply_config(void)
 void scope_config(struct scope_config *cfg)
 {
 	assert (cfg->trigger >= 0 && cfg->trigger < SCOPE_TRIGGER_MAX);
-	assert (cfg->window_size >= 64 && cfg->window_size <= MAX_WINDOW_SIZE);
+	assert (cfg->window_size > 0 && cfg->window_size <= MAX_WINDOW_SIZE);
 
 	/* Take any previously sent configuration to save time. */
 	struct scope_config null;
@@ -446,7 +366,8 @@ uint16_t *scope_read(float *average, TickType_t wait)
 {
 	/* Get a new window. */
 	uint16_t *window;
-	xQueueReceive(window_queue, &window, portMAX_DELAY);
+	if (!xQueueReceive(window_queue, &window, wait))
+		return NULL;
 
 	/* Report the long-term average voltage. */
 	if (average)

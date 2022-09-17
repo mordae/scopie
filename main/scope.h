@@ -61,7 +61,7 @@ struct scope_config {
 	/* Way to stabilize the image. See scope_trigger above. */
 	int trigger;
 
-	/* Number of samples to return between 64 and 2048. */
+	/* Number of samples to return between 1 and 510. */
 	unsigned window_size;
 
 	/* Voltage multiplier to compensate for an external voltage

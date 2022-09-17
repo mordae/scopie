@@ -60,7 +60,7 @@ enum {
 /*
  * Oscilloscopee
  */
-struct scope_config scope = {
+static struct scope_config scope = {
 	/* We keep these static: */
 	.atten = ADC_ATTEN_DB_6,
 	.channel = CONFIG_ADC_CH,
@@ -70,7 +70,7 @@ struct scope_config scope = {
 
 	/* And let user change these: */
 	.freq_hz = 250000,
-	.window_size = 880,
+	.window_size = 510,
 	.trigger = SCOPE_TRIGGER_RISING,
 };
 
@@ -98,6 +98,12 @@ static SemaphoreHandle_t paint_signal = NULL;
 
 static TickType_t show_signal_freq_until = 0;
 
+/* Historic windows. */
+#define HISTORY_MAX 128
+static uint16_t *history[HISTORY_MAX] = {0};
+static unsigned history_idx = 0;
+static unsigned history_offset = 0;
+
 
 /*
  * Timing measurements
@@ -121,7 +127,7 @@ enum {
 	MODE_MAX,
 };
 
-static volatile int mode = 0;
+static int mode = MODE_HOLD;
 
 enum {
 	SIGNAL_CW = 0,
@@ -129,21 +135,33 @@ enum {
 	SIGNAL_MAX,
 };
 
-static volatile int signal_type = 0;
-uint16_t *vs = NULL;
+static int signal_type = 0;
+
 
 static void gui_loop(void *arg)
 {
+	uint16_t *vs = NULL;
+
 	while (1) {
 		TickType_t t0 = xTaskGetTickCount();
 
 		if (!held) {
-			free(vs);
-			vs = scope_read(&average, pdMS_TO_TICKS(33));
+			uint16_t *newvs = scope_read(&average, pdMS_TO_TICKS(33));
+
+			if (NULL != newvs) {
+				history_idx = (history_idx + 1) % HISTORY_MAX;
+
+				if (history[history_idx])
+					free(history[history_idx]);
+
+				history[history_idx] = newvs;
+			}
 
 			if (hold)
 				held = true;
 		}
+
+		vs = history[(history_idx + HISTORY_MAX + history_offset) % HISTORY_MAX];
 
 		TickType_t t1 = xTaskGetTickCount();
 		lcd_draw_rect(0, CHROME, WIDTH - 1, HEIGHT - 1, BLACK);
@@ -210,9 +228,14 @@ static void gui_loop(void *arg)
 
 		lcd_draw_string(WIDTH - (8 * strlen(buf)), 0, WHITE, buf);
 
-		char status[8] = "";
+		char status[16] = "";
 
 		if (hold) {
+			/* Draw history offset. */
+			char buf[8];
+			sprintf(buf, "%i", history_offset);
+			strcat(status, buf);
+
 			/* Draw the pause symbol. */
 			strcat(status, "\x1c");
 		}
@@ -381,7 +404,7 @@ static void input_loop(void *arg)
 					      SOC_ADC_SAMPLE_FREQ_THRES_LOW,
 					      SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
 
-			scope.window_size = scope.freq_hz < 100000 ? 440 : 880;
+			scope.window_size = scope.freq_hz < 100000 ? 220 : 510;
 			h_offset = clamp(h_offset, 0, scope.window_size - WIDTH);
 
 			scope_config(&scope);
@@ -425,17 +448,16 @@ static void input_loop(void *arg)
 			held = false;
 		}
 		else if (MODE_HOLD == mode && green_steps) {
-			while (green_steps > 0) {
-				hold = !hold;
-				green_steps--;
-			}
+			int new_offset = history_offset + green_steps;
+			history_offset = clamp(new_offset, 1 - HISTORY_MAX, 0);
 
-			while (green_steps < 0) {
-				hold = !hold;
-				green_steps++;
+			if (0 == history_offset) {
+				hold = false;
+				held = false;
+			} else {
+				hold = true;
+				held = true;
 			}
-
-			held = false;
 		}
 		else if (MODE_TRIGGER == mode && green_steps) {
 			while (green_steps > 0) {
@@ -508,7 +530,7 @@ void app_main(void)
 	assert (NULL != paint_signal);
 
 	ESP_LOGI(tag, "Start the oscilloscope...");
-	scope_init(3, 0);
+	scope_init(10, 0);
 	scope_config(&scope);
 
 	ESP_LOGI(tag, "Start input processing task...");
