@@ -69,7 +69,7 @@ static struct scope_config scope = {
 	.multiplier = 2,
 
 	/* And let user change these: */
-	.freq_hz = 250000,
+	.freq_hz = 240000,
 	.window_size = 510,
 	.trigger = SCOPE_TRIGGER_RISING,
 };
@@ -208,7 +208,7 @@ static void gui_loop(void *arg)
 			sprintf(buf, "%i.%.3i kHz", signal_freq / 1000, signal_freq % 1000);
 			lcd_draw_string(0, 0, LBLUE, buf);
 		} else {
-			int freq_hz = 2 * scope.freq_hz / 5 / 100;
+			int freq_hz = 10 * scope.freq_hz / 24 / 100;
 			sprintf(buf, "%i.%.3i kHz", freq_hz / 1000, freq_hz % 1000);
 			lcd_draw_string(0, 0, LRED, buf);
 		}
@@ -400,7 +400,7 @@ static void input_loop(void *arg)
 		int blue_steps = rotary_read_steps(blue);
 
 		if (red_steps) {
-			scope.freq_hz = clamp(scope.freq_hz + red_steps * 250,
+			scope.freq_hz = clamp(scope.freq_hz + red_steps * 240,
 					      SOC_ADC_SAMPLE_FREQ_THRES_LOW,
 					      SOC_ADC_SAMPLE_FREQ_THRES_HIGH);
 
